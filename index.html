@@ -888,8 +888,6 @@ async function statementExcel(a, rows, opening, from, to, asFile) {
   downloadBlob(new Blob([buf], {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), `كشف حساب ${a.name} ${todayStr()}.xlsx`); }
 
 // ---------------------------------------------------------------- مشاركة الكشف على واتساب
-const waPhone = p => { let d = String(p || '').replace(/[^\d]/g, ''); if (!d) return '';
-  if (d.startsWith('00')) d = d.slice(2); if (d.startsWith('01') && d.length === 11) d = '2' + d; else if (d.startsWith('1') && d.length === 10) d = '20' + d; return d; };
 function waText(a, rows, opening, from, n) {
   const last = rows.length ? rows[rows.length - 1].bal : opening, list = n ? rows.slice(-n) : [];
   const lines = [`السلام عليكم ${a.name}`, `كشف حساب من ${S.lk.settings.company_name || ''} — بتاريخ ${todayStr()}`];
@@ -902,16 +900,13 @@ function waText(a, rows, opening, from, n) {
 function whatsappFlow(a, rows, opening, from, to) {
   const canFile = !!(navigator.canShare && navigator.canShare({files: [new File(['x'], 'x.xlsx', {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})]}));
   openSheet(`<h3>إرسال الكشف على واتساب</h3>
-    <label class="l">رقم العميل</label><input class="f num" id="wp" inputmode="tel" placeholder="01xxxxxxxxx" value="${esc(a.phone || '')}">
-    ${isMgr() ? '<label class="small"><input type="checkbox" id="wsave"> احفظ الرقم على حساب العميل</label>' : ''}
+    <div class="small muted">واتساب هيفتح وتختار اللي عايز تبعتله.</div>
     <label class="l">الحركات في الرسالة</label><select class="f" id="wn"><option value="0">الرصيد بس</option><option value="5">آخر 5 حركات</option><option value="10" selected>آخر 10 حركات</option><option value="9999">كل الحركات (في الفترة)</option></select>
     <label class="l">الرسالة (تقدر تعدّل فيها)</label><textarea class="f" id="wt" rows="9" style="font-size:13.5px"></textarea>
     <div style="height:10px"></div><button class="btn block" id="wgo" style="background:#1fa855">فتح واتساب بالرسالة</button>
     ${canFile ? '<div style="height:8px"></div><button class="btn sec block" id="wfile">إرسال ملف الكشف (Excel) — اختار واتساب</button>' : ''}`);
   const fill = () => { $('#wt').value = waText(a, rows, opening, from, +$('#wn').value); }; fill(); $('#wn').onchange = fill;
-  $('#wgo').onclick = async () => { const ph = waPhone($('#wp').value);
-    if ($('#wsave')?.checked && $('#wp').value.trim() && $('#wp').value.trim() !== (a.phone || '')) await run(() => api.updateAccount(a.id, {phone: $('#wp').value.trim()})).catch(() => {});
-    window.open(`https://wa.me/${ph}?text=${encodeURIComponent($('#wt').value)}`, '_blank'); };
+  $('#wgo').onclick = () => { window.open(`https://wa.me/?text=${encodeURIComponent($('#wt').value)}`, '_blank'); };
   $('#wfile') && ($('#wfile').onclick = () => locked($('#wfile'), async () => { try { const f = await statementExcel(a, rows, opening, from, to, true);
       await navigator.share({files: [f], title: 'كشف حساب ' + a.name}); } catch (e) { if (e && e.name !== 'AbortError') toast(errMsg(e), true); } }));
 }
