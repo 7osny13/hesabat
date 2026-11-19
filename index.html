@@ -82,11 +82,20 @@ table.t tr.cx td{text-decoration:line-through;opacity:.5}
 .login{max-width:380px;margin:12vh auto 0;padding:0 16px}
 .prog{height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden}.prog>div{height:100%;background:var(--pri2);width:0}
 .printonly{display:none}
+.pdoc{font-size:12px;color:#000}.pdoc h1{font-size:18px;margin:0;text-align:center}.pdoc h2{font-size:15px;margin:2px 0 0;text-align:center}
+.pdoc .meta{display:flex;justify-content:space-between;font-size:11.5px;margin:6px 0 8px;border-bottom:2px solid #000;padding-bottom:5px}
+.pdoc table{width:100%;border-collapse:collapse;margin-bottom:8px}.pdoc thead{display:table-header-group}
+.pdoc th,.pdoc td{border:1px solid #777;padding:4px 5px;text-align:right;vertical-align:top}.pdoc th{background:#e9edf2;font-weight:700;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.pdoc tr{page-break-inside:avoid}.pdoc td.n{direction:ltr;text-align:left;white-space:nowrap;font-variant-numeric:tabular-nums}
+.pdoc .sec{font-weight:700;font-size:13px;margin:8px 0 3px}.pdoc .tot td{font-weight:700;background:#f4f6f8;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.pdoc .np{color:#a15c00;font-style:italic}.pdoc .box{border:2px solid #000;border-radius:6px;padding:8px 10px;font-size:15px;font-weight:700;text-align:center;margin:8px 0}
+.pdoc .note{font-size:11px;color:#333}.pdoc .sign{display:flex;justify-content:space-around;margin-top:22px;font-size:12px}
 table.pj{width:100%;border-collapse:collapse;font-size:12px}table.pj th,table.pj td{border:1px solid #999;padding:4px 6px;vertical-align:top}
 @media print{.printonly{display:block}.screenonly{display:none!important}
-  header.top,nav.bottom,.noprint,.demo{display:none!important}
+  header.top,nav.bottom,.noprint,.demo,.toast,.sheet-bg{display:none!important}
   body,.app{background:#fff}.card{box-shadow:none;padding:0}main{padding:0}
   table.t{font-size:11px}
+  @page{size:A4;margin:11mm}
 }
 </style>
 </head>
@@ -116,6 +125,18 @@ const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${Stri
 const normAr = s => String(s || '').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[ًٌٍَُِّْـ]/g,'').replace(/\s+/g,' ').trim().toLowerCase();
 const balTxt = b => { b = +b || 0; if (Math.abs(b) < 0.005) return '<span class="muted">صفر</span>';
   return b > 0 ? `<span class="owe">عليه <span class="amt">${fmt(b)}</span></span>` : `<span class="cred">له <span class="amt">${fmt(-b)}</span></span>`; };
+// الرصيد بالكلام من غير سالب وموجب: you=true للطباعة اللي رايحة للعميل
+const balWord = (b, you) => { b = +b || 0; if (Math.abs(b) < 0.005) return 'صفر'; return `${fmt(Math.abs(b))} ${b > 0 ? (you ? 'عليك' : 'عليه') : (you ? 'لك' : 'له')}`; };
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
+const PRICE_LATER = ['sale', 'sale_return', 'purchase', 'purchase_return'];   // سطور ممكن تترحّل من غير سعر
+const needsPrice = l => PRICE_LATER.includes(l.line_type) && (l.price == null || l.price === '');
+// زرار ميتداسش مرتين: بيتقفل لحد ما العملية تخلص
+async function locked(btns, fn) { btns = [].concat(btns).filter(Boolean); if (btns.some(b => b.dataset.busy)) return;
+  btns.forEach(b => { b.dataset.busy = '1'; b.disabled = true; }); try { return await fn(); } finally { btns.forEach(b => { delete b.dataset.busy; if (b.isConnected) b.disabled = false; }); } }
+let exLoad; function loadExcelJS() { if (window.ExcelJS) return Promise.resolve();
+  return exLoad || (exLoad = new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
+    sc.onload = ok; sc.onerror = () => { exLoad = null; bad(new Error('مكتبة Excel محمّلتش — اتأكد من النت')); }; document.head.appendChild(sc); })); }
+function downloadBlob(blob, name) { const u = URL.createObjectURL(blob), a = document.createElement('a'); a.href = u; a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(u); a.remove(); }, 2000); }
 const KIND = {customer:'عميل', supplier:'مورد', both:'عميل ومورد'};
 const ROLE = {admin:'المدير', accountant:'المحاسب', employee:'موظف'};
 const STATUS = {draft:'مسودة', posted:'مترحّل', cancelled:'ملغي'};
@@ -181,8 +202,14 @@ function SupaApi() {
         all(() => sb.from('journal_lines').select('*').eq('day', d).order('id')), sb.from('cash_counts').select('*').eq('day', d).maybeSingle()]);
       return {journal: ok(j), lines: l, cash: ok(c)}; },
     async pendingDays() { return ok(await sb.from('journals').select('day,status').eq('status', 'open').order('day')); },
-    async addLine(row) { return ok(await sb.from('journal_lines').insert(row).select().single()); },
+    async addLine(row) { const r = await sb.from('journal_lines').insert(row).select().single();
+      // نفس السطر وصل قبل كده (ضغطة مرتين أو النت قطع ورجع) — منرجعش نضيفه
+      if (r.error && row.client_key && /journal_lines_client_key|duplicate key/i.test(r.error.message || '')) return ok(await sb.from('journal_lines').select('*').eq('client_key', row.client_key).single());
+      return ok(r); },
     async updateLine(id, patch) { return ok(await sb.from('journal_lines').update(patch).eq('id', id).select().single()); },
+    async pendingPrice() { return all(() => sb.from('journal_lines').select('*').eq('status', 'posted').is('price', null).in('line_type', PRICE_LATER).order('day').order('id')); },
+    async pricePosted(id, price) { return ok(await sb.rpc('price_posted_line', {p_id: id, p_price: price})); },
+    async methodBalances() { return ok(await sb.from('payment_method_balances').select('*').order('sort').order('id')); },
     async postLine(id) { return ok(await sb.rpc('post_line', {p_id: id})); },
     async unpostLine(id) { return ok(await sb.rpc('unpost_line', {p_id: id})); },
     async cancelLine(id, r) { return ok(await sb.rpc('cancel_line', {p_id: id, p_reason: r})); },
@@ -267,11 +294,12 @@ function DemoApi() {
     const itm = db.items.find(i => i.id === l.item_id)?.name || l.item_text || '';
     const descr = TYPES[l.line_type].short + (itm ? ' — ' + itm : '');
     const base = {day: l.day, sort_key: l.id, source: 'journal', journal_line_id: l.id, cancelled: false, notes: l.notes || null};
+    const np = needsPrice(l);
     const M = (account_id, debit, credit, extra = {}) => db.movements.push({id: id(), account_id, debit, credit, ...base, ...extra});
     const meth = db.methods.find(m => m.id === l.payment_method_id)?.name;
     switch (l.line_type) {
-      case 'sale': case 'purchase_return': M(l.account_id, l.amount, 0, {item_id: l.item_id, item_text: l.item_text, qty: l.qty, price: l.price, description: descr}); break;
-      case 'purchase': case 'sale_return': M(l.account_id, 0, l.amount, {item_id: l.item_id, item_text: l.item_text, qty: l.qty, price: l.price, description: descr}); break;
+      case 'sale': case 'purchase_return': M(l.account_id, np ? 0 : l.amount, 0, {item_id: l.item_id, item_text: l.item_text, qty: l.qty, price: l.price, description: descr, pending_side: np ? 'debit' : null}); break;
+      case 'purchase': case 'sale_return': M(l.account_id, 0, np ? 0 : l.amount, {item_id: l.item_id, item_text: l.item_text, qty: l.qty, price: l.price, description: descr, pending_side: np ? 'credit' : null}); break;
       case 'receipt': M(l.account_id, 0, l.amount, {description: descr + (meth ? ' — ' + meth : '')}); break;
       case 'payment': M(l.account_id, l.amount, 0, {description: descr + (meth ? ' — ' + meth : '')}); break;
       case 'direct_payment': M(l.account_id, 0, l.amount, {description: 'دفع مباشر إلى ' + acc(l.counter_account_id)}); M(l.counter_account_id, l.amount, 0, {description: 'استلام مباشر من ' + acc(l.account_id)}); break;
@@ -292,7 +320,7 @@ function DemoApi() {
     async saveAlias(alias, item_id) { if (!can.admin()) deny(); const o = db.aliases.find(a => a.alias === alias); if (o) o.item_id = item_id; else db.aliases.push({alias, item_id}); },
     async saveSetting(key, value) { if (!can.admin()) deny(); db.settings[key] = value; log('settings', key, 'UPDATE', null, value); },
     async accounts() { return db.accounts.map(a => { const ms = db.movements.filter(m => m.account_id === a.id && !m.cancelled);
-      return {...a, balance: round2(ms.reduce((s, m) => s + (+m.debit || 0) - (+m.credit || 0), 0)), n_moves: ms.length,
+      return {...a, balance: round2(ms.reduce((s, m) => s + (+m.debit || 0) - (+m.credit || 0), 0)), n_moves: ms.length, n_unpriced: ms.filter(m => m.pending_side).length,
         last_day: ms.reduce((x, m) => m.day > x ? m.day : x, ''), last_credit_day: ms.filter(m => m.credit > 0).reduce((x, m) => m.day > x ? m.day : x, '') || null}; }); },
     async createAccount(name, kind, phone) { if (!can.staff()) deny(); name = String(name || '').trim(); if (!name) throw new Error('اكتب الاسم');
       if (db.accounts.some(a => a.name === name)) throw new Error('فيه حساب بنفس الاسم'); const a = {id: id(), name, kind, phone, active: true}; a.party_id = a.id; db.accounts.push(a); log('accounts', a.id, 'INSERT', null, a); return a.id; },
@@ -306,7 +334,16 @@ function DemoApi() {
     async ensureDay(d) { if (!can.staff()) deny(); let j = db.journals.find(x => x.day === d); if (!j) { j = {day: d, status: 'open'}; db.journals.push(j); } return j.status; },
     async day(d) { return clone({journal: db.journals.find(x => x.day === d) || null, lines: db.lines.filter(l => l.day === d).sort((a, b) => a.id - b.id), cash: db.cash.find(c => c.day === d) || null}); },
     async pendingDays() { return clone(db.journals.filter(j => j.status === 'open').sort((a, b) => a.day < b.day ? -1 : 1)); },
-    async addLine(row) { if (!can.staff()) deny(); if (!dayOpen(row.day)) deny('اليوم ده مقفول'); const l = {...row, id: id(), status: 'draft', created_by: me.id, created_at: new Date().toISOString()};
+    async pendingPrice() { return clone(db.lines.filter(l => l.status === 'posted' && l.price == null && PRICE_LATER.includes(l.line_type))); },
+    async pricePosted(lid, price) { if (!can.staff()) deny(); if (!(+price > 0)) throw new Error('اكتب سعر صحيح'); const l = db.lines.find(x => x.id === lid);
+      const ms = db.movements.filter(m => m.journal_line_id === lid && m.pending_side); if (!l || l.status !== 'posted' || l.price != null || !ms.length) throw new Error(`السطر ${lid} مش مستني سعر`);
+      const old = clone(l); l.price = +price; l.amount = round2(l.qty * l.price); ms.forEach(m => { m.price = l.price; if (m.pending_side === 'debit') m.debit = l.amount; else m.credit = l.amount; m.pending_side = null; });
+      log('journal_lines', lid, 'UPDATE', old, l); },
+    async methodBalances() { return db.methods.map(m => { let b = +m.opening_balance || 0; for (const l of db.lines) { if (l.status === 'cancelled' || l.payment_method_id !== m.id || l.day <= (m.opening_day || '1900-01-01')) continue;
+        b += l.line_type === 'cash_transfer' ? (l.transfer_dir === 'to_bank' ? +l.amount : -l.amount) : ['receipt', 'cash_sale'].includes(l.line_type) ? +l.amount : l.line_type === 'payment' ? -l.amount : (l.line_type === 'expense' && ['us', 'party'].includes(l.bearer)) ? -l.amount : 0; }
+      return {...clone(m), balance: round2(b)}; }); },
+    async addLine(row) { if (!can.staff()) deny(); if (!dayOpen(row.day)) deny('اليوم ده مقفول');
+      if (row.client_key) { const dup = db.lines.find(x => x.client_key === row.client_key); if (dup) return clone(dup); } const l = {...row, id: id(), status: 'draft', created_by: me.id, created_at: new Date().toISOString()};
       if (TYPES[l.line_type].goods && l.qty != null && l.price != null) l.amount = round2(l.qty * l.price); db.lines.push(l); log('journal_lines', l.id, 'INSERT', null, l); return clone(l); },
     async updateLine(lid, patch) { if (!can.staff()) deny(); const l = db.lines.find(x => x.id === lid); if (l.status !== 'draft') throw new Error('السطر ده مترحّل أو ملغي، ومينفعش يتعدل. المحاسب يلغي الترحيل الأول.');
       if (!dayOpen(l.day)) throw new Error('اليوم ده مقفول'); const old = clone(l); Object.assign(l, patch);
@@ -363,7 +400,7 @@ function DemoApi() {
 function validate(l) {
   const p = [], T = TYPES[l.line_type];
   if (['sale', 'sale_return', 'purchase', 'purchase_return'].includes(l.line_type)) {
-    if (!l.account_id) p.push('اختار الحساب'); if (!(+l.qty > 0)) p.push('الكمية ناقصة'); if (l.price == null || l.price === '') p.push('لسه متسعّرش');
+    if (!l.account_id) p.push('اختار الحساب'); if (!(+l.qty > 0)) p.push('الكمية ناقصة');
   } else if (l.line_type === 'cash_sale') { if (!(+lineAmount(l) > 0)) p.push('لسه متسعّرش'); if (!l.payment_method_id) p.push('اختار طريقة الدفع'); }
   else if (['receipt', 'payment'].includes(l.line_type)) { if (!l.account_id) p.push('اختار الحساب'); if (!(+l.amount > 0)) p.push('المبلغ ناقص'); if (!l.payment_method_id) p.push('اختار طريقة الدفع'); }
   else if (l.line_type === 'direct_payment') { if (!l.account_id || !l.counter_account_id) p.push('اختار اللي دفع واللي استلم'); if (l.account_id && l.account_id === l.counter_account_id) p.push('نفس الحساب في الطرفين'); if (!(+l.amount > 0)) p.push('المبلغ ناقص'); }
@@ -429,12 +466,14 @@ SCREENS.home = async () => {
   const top = [...S.accounts].filter(a => !a.grp && a.balance > 0).sort((a, b) => b.balance - a.balance).slice(0, 6);
   const topSup = [...S.accounts].filter(a => !a.grp && a.balance < 0).sort((a, b) => a.balance - b.balance).slice(0, 6);
   const oldOpen = open.filter(j => j.day < S.day);
+  const pendN = S.accounts.reduce((t, a) => t + (+a.n_unpriced || 0), 0);
   shell(`<div class="stats">
       <div class="stat"><div class="k">إجمالي اللي لينا (عليهم)</div><div class="v owe">${fmt(owedToUs)}</div></div>
       <div class="stat"><div class="k">إجمالي اللي علينا (ليهم)</div><div class="v cred">${fmt(weOwe)}</div></div>
       <div class="stat"><div class="k">الكاش المفروض في الدرج</div><div class="v">${fmt(exp)}</div></div>
       <div class="stat"><div class="k">سطور النهارده</div><div class="v">${lines.length}</div></div></div>
     ${oldN ? `<div class="card small"><div class="row"><div class="grow">بواقي قديمة (${oldN} حساب) — مش داخلة في الإجماليات فوق</div>${balTxt(oldNet)}</div></div>` : ''}
+    ${pendN ? `<div class="card" style="background:var(--warnbg)"><div class="row"><div class="grow">⚠️ ${pendN} كمية مترحّلة و<b>السعر لم يحدد</b> — الأرصدة بتاعتها لسه مش نهائية</div><button class="btn sm sec" id="toPend">تسعيرهم</button></div></div>` : ''}
     ${oldOpen.length ? `<div class="card" style="background:var(--warnbg)"><b class="bad">أيام لسه مفتوحة:</b> ${oldOpen.map(j => `<a href="#" data-day="${j.day}">${j.day}</a>`).join('، ')}</div>` : ''}
     ${(unpriced || unposted) ? `<div class="card"><div class="row"><div class="grow">${unpriced ? `<div>⏳ ${unpriced} سطر مستني تسعير</div>` : ''}${unposted ? `<div>⏳ ${unposted} سطر مستني ترحيل</div>` : ''}</div>
       ${unpriced ? '<button class="btn sm sec" id="toPrice">التسعير</button>' : ''}${isMgr() && unposted ? '<button class="btn sm" id="toPost">الترحيل</button>' : ''}</div></div>` : ''}
@@ -443,6 +482,7 @@ SCREENS.home = async () => {
   document.querySelectorAll('[data-acc]').forEach(e => e.onclick = () => go('statement', +e.dataset.acc));
   document.querySelectorAll('[data-day]').forEach(e => e.onclick = ev => { ev.preventDefault(); S.day = e.dataset.day; go('journal'); });
   $('#toPrice') && ($('#toPrice').onclick = () => go('pricing')); $('#toPost') && ($('#toPost').onclick = () => go('posting'));
+  $('#toPend') && ($('#toPend').onclick = () => go('pricing'));
 };
 
 // ---------------------------------------------------------------- منتقي الحساب / الصنف
@@ -502,10 +542,11 @@ function lineRow(l) {
   const T = TYPES[l.line_type], t = lineText(l), amt = lineAmount(l), probs = l.status === 'draft' ? validate(l) : [];
   return `<div class="line ${l.status === 'cancelled' ? 'cx' : ''}" data-line="${l.id}">
     <div class="row"><span class="chip">${T.short}</span><div class="grow t">${esc(t.name || t.main)}</div>
-      <b class="amt">${amt != null ? fmt(amt) : '<span class="muted small">بدون سعر</span>'}</b></div>
+      <b class="amt">${amt != null ? fmt(amt) : `<span class="small" style="color:var(--warn)">${l.status === 'posted' ? '⚠️ السعر لم يحدد' : 'بدون سعر'}</span>`}</b></div>
     <div class="row small muted" style="margin-top:2px"><div class="grow">${t.name ? esc(t.main) : ''}${T.goods && l.price != null ? ` · سعر <span class="amt">${fmt(l.price)}</span>` : ''}${l.warehouse_id ? ' · ' + esc(whName(l.warehouse_id)) : ''}${l.card_no ? ' · كارت ' + esc(l.card_no) : ''}${l.notes && l.line_type !== 'expense' ? ' · ' + esc(l.notes) : ''}</div>
       <span class="chip ${l.status}">${STATUS[l.status]}</span></div>
     ${probs.length && l.status === 'draft' ? `<div class="small" style="color:var(--warn)">${probs.join(' · ')}</div>` : ''}
+    ${!probs.length && l.status === 'draft' && needsPrice(l) ? '<div class="small" style="color:var(--warn)">لسه متسعّرش — ينفع يتسعّر دلوقتي، أو يترحّل ويتسعّر بعدين</div>' : ''}
     ${l.status === 'cancelled' && l.cancel_reason ? `<div class="small bad">سبب الإلغاء: ${esc(l.cancel_reason)}</div>` : ''}</div>`;
 }
 SCREENS.journal = async () => {
@@ -522,12 +563,7 @@ SCREENS.journal = async () => {
     <div class="card small"><div class="row"><div class="grow">إجمالي البيع</div><b class="amt">${fmt(sum(goods.filter(l => ['sale', 'cash_sale'].includes(l.line_type)), lineAmount))}</b></div>
       <div class="row"><div class="grow">إجمالي التحصيل</div><b class="amt">${fmt(sum(money.filter(l => l.line_type === 'receipt'), l => +l.amount))}</b></div>
       <div class="row"><div class="grow">إجمالي الدفع والمصاريف</div><b class="amt">${fmt(sum(money.filter(l => ['payment', 'expense'].includes(l.line_type) && l.bearer !== 'party_direct'), l => +l.amount))}</b></div></div></div>
-    <div class="printonly"><h2 style="text-align:center;margin:0 0 8px">${esc(S.lk.settings.company_name || '')} — يومية ${new Date(S.day).toLocaleDateString('ar-EG', {weekday: 'long'})} <span dir="ltr">${S.day}</span></h2>
-      <table class="pj"><tr><th style="width:42%">البيان</th><th style="width:26%">الاسم</th><th>صادر ووارد</th></tr>
-      ${d.lines.filter(l => l.status !== 'cancelled').map(l => { const t = lineText(l), a = lineAmount(l), T = TYPES[l.line_type];
-        const nm = l.line_type === 'direct_payment' ? `${accName(l.account_id)} ← ${accName(l.counter_account_id)}` : (t.name || '');
-        return T.goods ? `<tr><td>${esc(t.main)}${l.price != null ? ' × ' + fmt(l.price) : ''}${a != null ? ' = ' + fmt(a) : ''}${l.card_no ? ' (كارت ' + esc(l.card_no) + ')' : ''}</td><td>${esc(nm)}</td><td></td></tr>`
-          : `<tr><td>${T.short}</td><td>${esc(nm)}</td><td>${fmt(a)} — ${esc(t.main)}</td></tr>`; }).join('')}</table></div>
+    <div class="printonly">${journalPrint(d)}</div>
     <div class="row noprint" style="gap:8px"><button class="btn sec grow" id="toPrice">التسعير</button>${isMgr() ? '<button class="btn grow" id="toPost">المراجعة والترحيل</button>' : ''}</div>`);
   $('#dpick').onchange = e => { S.day = e.target.value || todayStr(); go('journal'); };
   $('#pr').onclick = () => window.print();
@@ -536,6 +572,38 @@ SCREENS.journal = async () => {
     $('#addO').onclick = () => typeChooser(['direct_payment', 'sale_return', 'purchase_return', 'cash_transfer']); }
   document.querySelectorAll('[data-line]').forEach(e => e.onclick = () => lineActions(d.lines.find(l => l.id === +e.dataset.line), open));
 };
+// طباعة اليومية: جدول البضاعة + جدول الفلوس + ملخص + توقيعات
+function journalPrint(d) {
+  const L = d.lines.filter(l => l.status !== 'cancelled'), goods = L.filter(l => TYPES[l.line_type].goods), money = L.filter(l => !TYPES[l.line_type].goods);
+  const nm = l => l.line_type === 'direct_payment' ? `${accName(l.account_id)} ← ${accName(l.counter_account_id)}` : (l.account_id ? accName(l.account_id) : (l.free_name || ''));
+  const unit = l => S.lk.items.find(i => i.id === l.item_id)?.unit || 'طن';
+  const dir = l => { const a = +lineAmount(l) || 0;
+    if (['receipt', 'cash_sale'].includes(l.line_type)) return [a, 0];
+    if (l.line_type === 'payment' || (l.line_type === 'expense' && l.bearer !== 'party_direct')) return [0, a];
+    if (l.line_type === 'cash_transfer') return l.transfer_dir === 'from_bank' ? [a, 0] : [0, a]; return [0, 0]; };
+  const det = l => { const t = lineText(l); if (l.line_type === 'direct_payment') return `دفع مباشر ${fmt(l.amount)}${l.notes ? ' · ' + l.notes : ''}`;
+    if (l.line_type === 'expense') return `${l.notes || 'مصروف'} · ${(BEARER[l.bearer] || '').split(' (')[0]}${l.bearer === 'party_direct' ? ' ' + fmt(l.amount) : ''}${l.payment_method_id && l.bearer !== 'party_direct' ? ' · ' + methodName(l.payment_method_id) : ''}`;
+    return t.main + (l.notes ? ' · ' + l.notes : ''); };
+  const sumBy = (arr, f) => arr.reduce((s, l) => s + (f(l) || 0), 0);
+  const sales = sumBy(goods.filter(l => ['sale', 'cash_sale'].includes(l.line_type)), lineAmount), np = goods.filter(l => lineAmount(l) == null).length;
+  const mIn = sumBy(money, l => dir(l)[0]) + sumBy(goods.filter(l => l.line_type === 'cash_sale'), l => +lineAmount(l) || 0), mOut = sumBy(money, l => dir(l)[1]);
+  const qtyBy = {}; goods.forEach(l => { const k = (['purchase', 'sale_return'].includes(l.line_type) ? 'وارد' : 'طالع') + ' ' + itemName(l); qtyBy[k] = (qtyBy[k] || 0) + (+l.qty || 0); });
+  const dayName = new Date(S.day + 'T12:00:00').toLocaleDateString('ar-EG', {weekday: 'long'});
+  return `<div class="pdoc"><h1>${esc(S.lk.settings.company_name || '')}</h1><h2>اليومية — ${dayName} <span dir="ltr">${S.day}</span></h2>
+    <div class="meta"><span>${d.journal?.status === 'closed' ? 'اليوم مقفول' : 'اليوم مفتوح'} · ${L.length} سطر</span><span>اتطبعت: <span dir="ltr">${new Date().toLocaleString('en-GB', {dateStyle: 'short', timeStyle: 'short'})}</span></span></div>
+    <div class="sec">البضاعة (${goods.length})</div>
+    <table><thead><tr><th style="width:4%">م</th><th style="width:9%">النوع</th><th>الاسم</th><th style="width:19%">الصنف</th><th style="width:9%">الكمية</th><th style="width:10%">السعر</th><th style="width:12%">الجملة</th><th style="width:13%">المخزن / كارت</th></tr></thead><tbody>
+    ${goods.map((l, i) => { const a = lineAmount(l); return `<tr><td>${i + 1}</td><td>${TYPES[l.line_type].short}</td><td>${esc(nm(l))}</td><td>${esc(itemName(l))}</td><td><span dir="ltr">${fmtq(l.qty)}</span> ${unit(l)}</td>
+      <td class="${l.price == null ? 'np' : 'n'}">${l.price == null ? 'لم يحدد' : fmt(l.price)}</td><td class="n">${a == null ? '' : fmt(a)}</td><td>${esc(whName(l.warehouse_id))}${l.card_no ? ' · ' + esc(l.card_no) : ''}</td></tr>`; }).join('') || '<tr><td colspan="8" style="text-align:center">مفيش</td></tr>'}
+    </tbody></table>
+    <div class="sec">الفلوس (${money.length})</div>
+    <table><thead><tr><th style="width:4%">م</th><th style="width:11%">النوع</th><th style="width:24%">الاسم</th><th>التفاصيل</th><th style="width:13%">داخل</th><th style="width:13%">طالع</th></tr></thead><tbody>
+    ${money.map((l, i) => { const [a, b] = dir(l); return `<tr><td>${i + 1}</td><td>${TYPES[l.line_type].short}</td><td>${esc(nm(l))}</td><td>${esc(det(l))}</td><td class="n">${a ? fmt(a) : ''}</td><td class="n">${b ? fmt(b) : ''}</td></tr>`; }).join('') || '<tr><td colspan="6" style="text-align:center">مفيش</td></tr>'}
+    <tr class="tot"><td></td><td colspan="3">الإجمالي (+ البيع النقدي في الداخل)</td><td class="n">${fmt(mIn)}</td><td class="n">${fmt(mOut)}</td></tr></tbody></table>
+    <table style="width:60%"><tbody><tr class="tot"><td>إجمالي البيع${np ? ' (المتسعّر بس)' : ''}</td><td class="n">${fmt(sales)}</td></tr>
+      ${Object.entries(qtyBy).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="n">${fmtq(round2(v))}</td></tr>`).join('')}
+      ${np ? `<tr><td class="np" colspan="2">${np} سطر بضاعة السعر لم يحدد</td></tr>` : ''}</tbody></table>
+    <div class="sign"><span>كتبها: ..................</span><span>راجعها: ..................</span><span>المحاسب: ..................</span></div></div>`; }
 function typeChooser(types) { openSheet(`<h3>نوع السطر</h3><div class="typegrid">${types.map(t => `<button data-t="${t}">${TYPES[t].label}</button>`).join('')}</div>`);
   document.querySelectorAll('.typegrid button').forEach(b => b.onclick = () => lineForm({line_type: b.dataset.t, day: S.day})); }
 function lineActions(l, open) {
@@ -558,6 +626,7 @@ function cancelFlow(l) {
 }
 function lineForm(l0) {
   const l = {...l0}; const T = TYPES[l.line_type]; const isNew = !l.id;
+  const ck = isNew ? uuid() : null;   // كود السطر ده — لو اتبعت مرتين قاعدة البيانات بترفض التاني
   const meth = S.lk.methods.filter(m => m.active !== false);
   const methodOpts = (filter) => `<option value="">— اختار —</option>` + meth.filter(filter || (() => true)).map(m => `<option value="${m.id}" ${+l.payment_method_id === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
   if (isNew && T.method && !l.payment_method_id) l.payment_method_id = meth.find(m => m.kind === 'cash')?.id;
@@ -597,14 +666,15 @@ function lineForm(l0) {
     if (T.goods) { r.item_id = pI.get(); r.item_text = r.item_id ? null : (pI.text() || null); r.qty = num('#fQty'); r.card_no = $('#fCard').value.trim() || null; r.warehouse_id = +$('#fWh').value || null; r.price = num('#fPrice'); }
     if (T.money) r.amount = num('#fAmt'); if (T.transfer) r.transfer_dir = $('#fDir').value;
     if ($('#fMeth')) r.payment_method_id = +$('#fMeth').value || null; if ($('#fRef')) r.ref_no = $('#fRef').value.trim() || null;
-    r.notes = $('#fNotes')?.value.trim() || null;
+    r.notes = $('#fNotes')?.value.trim() || null; if (ck) r.client_key = ck;
     if (T.goods && !(r.qty > 0)) throw new Error('اكتب الكمية'); if (T.goods && !r.item_id && !r.item_text) throw new Error('اختار الصنف');
     if (T.acc && !r.account_id && l.line_type !== 'direct_payment') throw new Error('اختار الحساب أو اضغط "حساب جديد"');
     if (T.money && !(r.amount > 0)) throw new Error('اكتب المبلغ');
     if (r.warehouse_id) S.lastWh = r.warehouse_id; return r; };
-  const save = async again => { let r; try { r = collect(); } catch (e) { return toast(e.message, true); }
-    if (isNew) await run(() => api.addLine(r), 'اتضاف'); else { delete r.day; delete r.line_type; await run(() => api.updateLine(l.id, r), 'اتحفظ'); }
-    closeSheet(true); await go(S.tab); if (again) lineForm({line_type: l.line_type, day: l.day}); };
+  let done = false;
+  const save = again => locked([$('#sv'), $('#svn')], async () => { if (done) return; let r; try { r = collect(); } catch (e) { return toast(e.message, true); }
+    if (isNew) await run(() => api.addLine(r), 'اتضاف'); else { delete r.day; delete r.line_type; delete r.client_key; await run(() => api.updateLine(l.id, r), 'اتحفظ'); }
+    done = true; closeSheet(true); await go(S.tab); if (again) lineForm({line_type: l.line_type, day: l.day}); });
   $('#sv').onclick = () => save(false); $('#svn') && ($('#svn').onclick = () => save(true)); $('#cx') && ($('#cx').onclick = () => cancelFlow(l));
 }
 
@@ -612,37 +682,44 @@ function lineForm(l0) {
 SCREENS.pricing = async () => {
   const d = await api.day(S.day); const open = d.journal?.status === 'open';
   const rows = d.lines.filter(l => l.status === 'draft' && TYPES[l.line_type].goods);
-  const sugg = {}; await Promise.all(rows.map(async l => { if (l.account_id) sugg[l.id] = await api.lastPrice(l.account_id, l.item_id, l.item_text).catch(() => null); }));
-  shell(`<div class="card"><div class="row"><input type="date" class="f" id="dpick" value="${S.day}" style="max-width:170px"><div class="grow small muted">سطور البضاعة اللي لسه مترحّلتش</div></div></div>
-    <div class="card">${rows.map(l => `<div class="line"><div class="row"><span class="chip">${TYPES[l.line_type].short}</span><div class="grow t">${esc(l.account_id ? accName(l.account_id) : (l.free_name || 'زبون نقدي'))}</div></div>
+  const pend = await api.pendingPrice().catch(() => []);
+  const sugg = {}; await Promise.all([...rows, ...pend].map(async l => { if (l.account_id) sugg[l.id] = await api.lastPrice(l.account_id, l.item_id, l.item_text).catch(() => null); }));
+  const prow = (l, en) => `<div class="line"><div class="row"><span class="chip">${TYPES[l.line_type].short}</span><div class="grow t">${esc(l.account_id ? accName(l.account_id) : (l.free_name || 'زبون نقدي'))}</div>${en === 'p' ? `<span class="small muted amt">${l.day}</span>` : ''}</div>
       <div class="small muted">${fmtq(l.qty)} ${esc(itemName(l))}${l.card_no ? ' · كارت ' + esc(l.card_no) : ''}</div>
-      <div class="row" style="margin-top:6px"><input class="f num pr" data-id="${l.id}" data-q="${l.qty}" inputmode="decimal" placeholder="السعر" value="${l.price ?? ''}" ${open ? '' : 'disabled'} style="max-width:150px">
+      <div class="row" style="margin-top:6px"><input class="f num pr" data-id="${l.id}" data-q="${l.qty}" data-k="${en}" inputmode="decimal" placeholder="السعر" value="${l.price ?? ''}" ${en === false ? 'disabled' : ''} style="max-width:150px">
         ${sugg[l.id] != null ? `<button class="btn ghost sm use" data-id="${l.id}" data-p="${sugg[l.id]}">آخر سعر <span class="amt">${fmt(sugg[l.id])}</span></button>` : ''}
-        <div class="grow"></div><b class="amt tot" data-id="${l.id}">${l.price != null ? fmt(round2(l.qty * l.price)) : ''}</b></div></div>`).join('') || '<div class="empty">مفيش سطور مستنية تسعير</div>'}</div>
-    ${rows.length && open ? '<button class="btn block" id="savePrices">حفظ الأسعار</button>' : ''}`);
+        <div class="grow"></div><b class="amt tot" data-id="${l.id}">${l.price != null ? fmt(round2(l.qty * l.price)) : ''}</b></div></div>`;
+  shell(`<div class="card"><div class="row"><input type="date" class="f" id="dpick" value="${S.day}" style="max-width:170px"><div class="grow small muted">سطور البضاعة اللي لسه مترحّلتش</div></div></div>
+    <div class="card">${rows.map(l => prow(l, open ? 'd' : false)).join('') || '<div class="empty">مفيش سطور مستنية تسعير</div>'}</div>
+    ${pend.length ? `<div class="card" style="border:1px solid var(--warn)"><h2>⚠️ مترحّلة و«السعر لم يحدد» <span class="muted small">(${pend.length} — من كل الأيام)</span></h2>
+      <div class="small muted" style="margin-bottom:4px">أول ما تحط السعر، المبلغ بيتضاف على الحساب بتاريخ العملية الأصلي.</div>${pend.map(l => prow(l, 'p')).join('')}</div>` : ''}
+    ${(rows.length && open) || pend.length ? '<button class="btn block" id="savePrices">حفظ الأسعار</button>' : ''}`);
   $('#dpick').onchange = e => { S.day = e.target.value; go('pricing'); };
   const recalc = inp => { const t = document.querySelector(`.tot[data-id="${inp.dataset.id}"]`); const v = +inp.value.replace(/,/g, ''); t.textContent = inp.value ? fmt(round2(v * +inp.dataset.q)) : ''; };
   document.querySelectorAll('.pr').forEach(i => i.oninput = () => recalc(i));
   document.querySelectorAll('.use').forEach(b => b.onclick = () => { const i = document.querySelector(`.pr[data-id="${b.dataset.id}"]`); i.value = b.dataset.p; recalc(i); });
-  $('#savePrices') && ($('#savePrices').onclick = async () => { let n = 0;
-    for (const i of document.querySelectorAll('.pr')) { const l = rows.find(x => x.id === +i.dataset.id); const v = i.value.trim() === '' ? null : +i.value.replace(/,/g, '');
-      if (v !== (l.price == null ? null : +l.price)) { await run(() => api.updateLine(l.id, {price: v})); n++; } }
-    toast(n ? `اتحفظ ${n} سعر` : 'مفيش تغيير'); go('pricing'); });
+  $('#savePrices') && ($('#savePrices').onclick = () => locked($('#savePrices'), async () => { let n = 0, bad = 0;
+    for (const i of document.querySelectorAll('.pr:not([disabled])')) { const v = i.value.trim() === '' ? null : +i.value.replace(/,/g, '');
+      if (i.dataset.k === 'p') { if (v == null) continue; try { await api.pricePosted(+i.dataset.id, v); n++; } catch (e) { bad++; toast(errMsg(e), true); } continue; }
+      const l = rows.find(x => x.id === +i.dataset.id); if (v !== (l.price == null ? null : +l.price)) { try { await api.updateLine(l.id, {price: v}); n++; } catch (e) { bad++; toast(errMsg(e), true); } } }
+    if (n) await loadAccounts(); if (!bad) toast(n ? `اتحفظ ${n} سعر` : 'مفيش تغيير'); go('pricing'); }));
 };
 
 // ---------------------------------------------------------------- المراجعة والترحيل
 SCREENS.posting = async () => {
   if (!isMgr()) { shell('<div class="card">الشاشة دي للمحاسب والمدير بس</div>'); return; }
   const d = await api.day(S.day); const open = d.journal?.status === 'open';
-  const drafts = d.lines.filter(l => l.status === 'draft'); const ready = drafts.filter(l => !validate(l).length);
+  const drafts = d.lines.filter(l => l.status === 'draft'); const okL = drafts.filter(l => !validate(l).length);
+  const ready = okL.filter(l => !needsPrice(l)), readyNP = okL.filter(needsPrice);
   const exp = await api.cashExpected(S.day);
   const byMeth = {}; for (const l of d.lines) { if (l.status === 'cancelled' || !l.payment_method_id) continue; const m = S.lk.methods.find(x => x.id === l.payment_method_id); if (!m) continue;
     const sign = ['receipt', 'cash_sale'].includes(l.line_type) ? 1 : (['payment', 'expense'].includes(l.line_type) && l.bearer !== 'party_direct') ? -1 : l.line_type === 'cash_transfer' ? (l.transfer_dir === 'to_bank' ? 1 : -1) : 0;
     if (!sign) continue; byMeth[m.name] = byMeth[m.name] || {in: 0, out: 0, kind: m.kind}; const a = +lineAmount(l) || 0; if (sign > 0) byMeth[m.name].in += a; else byMeth[m.name].out += a; }
   shell(`<div class="card"><div class="row"><input type="date" class="f" id="dpick" value="${S.day}" style="max-width:170px"><span class="chip ${d.journal?.status || ''}">${open ? 'مفتوح' : 'مقفول'}</span></div></div>
-    <div class="card"><h2>١. الترحيل</h2><div class="small muted">${drafts.length} سطر مستني · ${ready.length} جاهز للترحيل</div>
+    <div class="card"><h2>١. الترحيل</h2><div class="small muted">${drafts.length} سطر مستني · ${ready.length} جاهز للترحيل${readyNP.length ? ` · ${readyNP.length} من غير سعر` : ''}</div>
       ${drafts.map(lineRow).join('')}
       ${open && ready.length ? `<div style="height:8px"></div><button class="btn block" id="postAll">ترحيل الجاهز (${ready.length})</button>` : ''}
+      ${open && readyNP.length ? `<div style="height:8px"></div><button class="btn sec block" id="postNP">ترحيل ${readyNP.length} سطر من غير سعر…</button>` : ''}
       <div class="prog" id="pg" hidden style="margin-top:8px"><div></div></div></div>
     <div class="card"><h2>٢. جرد الكاش</h2>
       <div class="row"><div class="grow">المفروض في الدرج</div><b class="amt">${fmt(exp)}</b></div>
@@ -653,9 +730,13 @@ SCREENS.posting = async () => {
       <div class="small muted" style="margin-top:6px">طابق البنوك والمحافظ مع برنامج البنوك.</div></div>
     <div class="card"><h2>٣. قفل اليوم</h2>${open ? '<button class="btn block" id="close">قفل اليوم</button>' : `<div class="small">اليوم مقفول.</div>${isAdmin() ? '<button class="btn sec block" id="reopen" style="margin-top:8px">فتح اليوم تاني (المدير)</button>' : ''}`}</div>`);
   $('#dpick').onchange = e => { S.day = e.target.value; go('posting'); };
-  $('#postAll') && ($('#postAll').onclick = async () => { const pg = $('#pg'); pg.hidden = false; let ok = 0, bad = [];
-    for (let i = 0; i < ready.length; i++) { try { await api.postLine(ready[i].id); ok++; } catch (e) { bad.push(errMsg(e)); } pg.firstChild.style.width = ((i + 1) / ready.length * 100) + '%'; }
+  const postList = (list, btns) => locked(btns, async () => { const pg = $('#pg'); pg.hidden = false; let ok = 0, bad = [];
+    for (let i = 0; i < list.length; i++) { try { await api.postLine(list[i].id); ok++; } catch (e) { bad.push(errMsg(e)); } pg.firstChild.style.width = ((i + 1) / list.length * 100) + '%'; }
     await loadAccounts(); toast(`اترحّل ${ok} سطر` + (bad.length ? ` · ${bad.length} فيهم مشكلة` : ''), !!bad.length); if (bad.length) console.warn(bad); go('posting'); });
+  $('#postAll') && ($('#postAll').onclick = () => postList(ready, [$('#postAll'), $('#postNP')]));
+  $('#postNP') && ($('#postNP').onclick = () => { openSheet(`<h3>ترحيل من غير سعر</h3><div class="small">السطور دي هتتسجل على الحسابات بالكمية بس، وعليها علامة <b>«السعر لم يحدد»</b> لحد ما تتسعّر من شاشة التسعير. الرصيد مش هيتغير غير لما السعر يتحط.</div>
+      <div style="margin:8px 0">${readyNP.map(lineRow).join('')}</div><button class="btn block" id="npGo">ترحيل ${readyNP.length} سطر من غير سعر</button>`);
+    $('#npGo').onclick = () => { const b = $('#npGo'); postList(readyNP, [b, $('#postAll'), $('#postNP')]).finally(() => closeSheet()); }; });
   $('#saveCash') && ($('#saveCash').onclick = async () => { const a = +$('#act').value.replace(/,/g, ''); if ($('#act').value.trim() === '') return toast('اكتب الكاش الموجود', true);
     await run(() => api.saveCashCount(S.day, a, $('#cnote').value), 'اتحفظ الجرد'); go('posting'); });
   $('#close') && ($('#close').onclick = async () => { await run(() => api.closeDay(S.day), 'اليوم اتقفل'); go('posting'); });
@@ -697,26 +778,30 @@ SCREENS.statement = async (accId) => {
     if (from && m.day < from) { opening += delta; run_ = opening; continue; } if (to && m.day > to) continue;
     run_ = round2((rows.length || from ? run_ : 0) + delta); rows.push({...m, bal: run_}); }
   const totD = rows.filter(r => !r.cancelled).reduce((s, r) => s + (+r.debit || 0), 0), totC = rows.filter(r => !r.cancelled).reduce((s, r) => s + (+r.credit || 0), 0);
-  shell(`<div class="card"><div class="row"><button class="btn ghost noprint" id="back">→ رجوع</button><div class="grow"></div>${a.grp ? `<span class="chip draft">${esc(a.grp)}</span>` : ''}<span class="chip">${KIND[a.kind]}</span></div>
+  const pr = rows.filter(r => !r.cancelled);   // اللي بيروح للعميل: من غير الملغي
+  const npTag = '<span class="chip draft">⚠️ السعر لم يحدد</span>';
+  shell(`<div class="card screenonly"><div class="row"><button class="btn ghost noprint" id="back">→ رجوع</button><div class="grow"></div>${a.grp ? `<span class="chip draft">${esc(a.grp)}</span>` : ''}<span class="chip">${KIND[a.kind]}</span></div>
       <h2 style="font-size:19px;margin:4px 0">${esc(a.name)}</h2><div style="font-size:18px;font-weight:700">${balTxt(a.balance)}</div>
+      ${+a.n_unpriced ? `<div class="small" style="color:var(--warn);margin-top:2px">⚠️ فيه ${a.n_unpriced} كمية «السعر لم يحدد» — الرصيد هيتغير لما تتسعّر</div>` : ''}
       ${a.legacy_ref ? `<div class="small muted">في الإكسيل: ${esc(a.legacy_ref)}</div>` : ''}
       ${linked.length ? `<div class="small" style="margin-top:6px;background:#f3f6fa;border-radius:8px;padding:6px 8px">حسابات تانية لنفس الشخص: ${linked.map(x => `<a href="#" data-go="${x.id}">${esc(x.name)}</a> (${balTxt(x.balance)})`).join('، ')}
         <div><b>الصافي المجمّع: ${balTxt(round2(linked.reduce((t, x) => t + +x.balance, +a.balance)))}</b></div></div>` : ''}
       <div class="grid2 noprint" style="margin-top:8px"><div><label class="l">من</label><input type="date" class="f" id="f1" value="${from}"></div><div><label class="l">إلى</label><input type="date" class="f" id="f2" value="${to}"></div></div>
       <div class="row wrap noprint" style="margin-top:8px"><label class="small"><input type="checkbox" id="scx" ${S.stF.showCx ? 'checked' : ''}> إظهار الملغي</label><div class="grow"></div>
         <button class="btn sm sec" id="pr">طباعة</button><button class="btn sm sec" id="xl">Excel</button>${isMgr() ? '<button class="btn sm sec" id="adj">تسوية</button><button class="btn sm sec" id="edA">تعديل</button><button class="btn sm sec" id="lnk">ربط</button>' : ''}</div></div>
-    <div class="card narrow stl">${from ? `<div class="r"><div class="n"><div class="grow">رصيد قبل ${from}</div><b class="amt">${fmt(opening)}</b></div></div>` : ''}
+    <div class="card narrow stl screenonly">${from ? `<div class="r"><div class="n"><div class="grow">رصيد قبل ${from}</div><b class="amt">${fmt(opening)}</b></div></div>` : ''}
       ${rows.map(r => `<div class="r ${r.cancelled ? 'cx' : ''}" data-m="${r.id}"><div class="d">${esc(stDesc(r))}</div>${r.cancelled && r.cancel_reason ? `<div class="small bad">ملغي: ${esc(r.cancel_reason)}</div>` : ''}
-        <div class="n"><div class="grow amt">${r.day}</div>${+r.debit ? `<span class="owe">عليه <span class="amt">${fmt(r.debit)}</span></span>` : ''}${+r.credit ? `<span class="cred">له <span class="amt">${fmt(r.credit)}</span></span>` : ''}
-        <b class="amt">${r.bal == null ? '' : fmt(r.bal)}</b></div></div>`).join('') || '<div class="empty">مفيش حركات</div>'}
+        <div class="n"><div class="grow amt">${r.day}</div>${r.pending_side ? npTag : ''}${+r.debit ? `<span class="owe">عليه <span class="amt">${fmt(r.debit)}</span></span>` : ''}${+r.credit ? `<span class="cred">له <span class="amt">${fmt(r.credit)}</span></span>` : ''}
+        <b class="small">${r.bal == null ? '' : `الرصيد ${balWord(r.bal)}`}</b></div></div>`).join('') || '<div class="empty">مفيش حركات</div>'}
       <div class="r"><div class="n"><div class="grow"><b>الإجمالي</b></div><span class="owe amt">${fmt(totD)}</span><span class="cred amt">${fmt(totC)}</span></div></div>
-      <div class="small muted" style="margin-top:6px">الرقم التقيل = الرصيد بعد الحركة. موجب = عليه، سالب = له.</div></div>
-    <div class="card scroll wide"><table class="t"><thead><tr><th>التاريخ</th><th>البيان</th><th>عليه</th><th>له</th><th>الرصيد</th></tr></thead><tbody>
+      <div class="small muted" style="margin-top:6px">«عليه» = مبلغ مطلوب منه لينا · «له» = مبلغ ليه عندنا.</div></div>
+    <div class="card scroll wide screenonly"><table class="t"><thead><tr><th>التاريخ</th><th>البيان</th><th>عليه</th><th>له</th><th>الرصيد</th></tr></thead><tbody>
       ${from ? `<tr><td></td><td><b>رصيد قبل ${from}</b></td><td></td><td></td><td class="amt">${fmt(opening)}</td></tr>` : ''}
       ${rows.map(r => `<tr class="${r.cancelled ? 'cx' : ''}" data-m="${r.id}"><td class="amt">${r.day}</td><td>${esc(stDesc(r))}${r.cancelled && r.cancel_reason ? `<div class="small bad">ملغي: ${esc(r.cancel_reason)}</div>` : ''}</td>
-        <td class="amt">${+r.debit ? fmt(r.debit) : ''}</td><td class="amt">${+r.credit ? fmt(r.credit) : ''}</td><td class="amt">${r.bal == null ? '' : fmt(r.bal)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">مفيش حركات</td></tr>'}
-      <tr><td></td><td><b>الإجمالي</b></td><td class="amt"><b>${fmt(totD)}</b></td><td class="amt"><b>${fmt(totC)}</b></td><td class="amt"><b>${fmt(run_)}</b></td></tr></tbody></table>
-      <div class="small muted" style="margin-top:6px">الرصيد الموجب = عليه لينا، والسالب = له عندنا.</div></div>`);
+        <td class="amt">${r.pending_side === 'debit' ? npTag : +r.debit ? fmt(r.debit) : ''}</td><td class="amt">${r.pending_side === 'credit' ? npTag : +r.credit ? fmt(r.credit) : ''}</td><td>${r.bal == null ? '' : balWord(r.bal)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">مفيش حركات</td></tr>'}
+      <tr><td></td><td><b>الإجمالي</b></td><td class="amt"><b>${fmt(totD)}</b></td><td class="amt"><b>${fmt(totC)}</b></td><td><b>${balWord(run_)}</b></td></tr></tbody></table>
+      <div class="small muted" style="margin-top:6px">«عليه» = مبلغ مطلوب منه لينا · «له» = مبلغ ليه عندنا.</div></div>
+    <div class="printonly">${statementPrint(a, pr, opening, from, to)}</div>`);
   $('#back').onclick = () => go('accounts');
   document.querySelectorAll('[data-go]').forEach(e => e.onclick = ev => { ev.preventDefault(); go('statement', +e.dataset.go); });
   $('#lnk') && ($('#lnk').onclick = () => { openSheet(`<h3>ربط ${esc(a.name)} بحساب تاني لنفس الشخص</h3><div class="small muted">كل حساب بيفضل بكشفه لوحده، والصافي المجمّع بيظهر فوق.</div><label class="l">الحساب التاني</label><div id="lp"></div>
@@ -726,15 +811,11 @@ SCREENS.statement = async (accId) => {
     $('#unl') && ($('#unl').onclick = async () => { await run(() => api.unlinkAccount(accId), 'اتفك الربط'); closeSheet(); go('statement', accId); }); });
   const upd = () => { S.stF.from = $('#f1').value; S.stF.to = $('#f2').value; S.stF.showCx = $('#scx').checked; go('statement', accId); };
   $('#f1').onchange = upd; $('#f2').onchange = upd; $('#scx').onchange = upd; $('#pr').onclick = () => window.print();
-  $('#xl').onclick = () => { if (!window.XLSX) return toast('لحظة، مكتبة Excel لسه بتحمّل', true);
-    const data = [['التاريخ', 'البيان', 'الكمية', 'السعر', 'عليه', 'له', 'الرصيد', 'ملغي']]; if (from) data.push(['', 'رصيد قبل ' + from, '', '', '', '', opening, '']);
-    rows.forEach(r => data.push([r.day, stDesc(r), r.qty ?? '', r.price ?? '', +r.debit || '', +r.credit || '', r.bal ?? '', r.cancelled ? 'ملغي' : '']));
-    const ws = XLSX.utils.aoa_to_sheet(data); ws['!cols'] = [{wch: 11}, {wch: 40}, {wch: 8}, {wch: 9}, {wch: 13}, {wch: 13}, {wch: 14}, {wch: 6}];
-    const wb = XLSX.utils.book_new(); wb.Workbook = {Views: [{RTL: true}]}; XLSX.utils.book_append_sheet(wb, ws, 'كشف حساب'); XLSX.writeFile(wb, `كشف ${a.name} ${todayStr()}.xlsx`); };
+  $('#xl').onclick = () => locked($('#xl'), () => run(() => statementExcel(a, pr, opening, from, to)));
   $('#adj') && ($('#adj').onclick = () => { openSheet(`<h3>تسوية على ${esc(a.name)}</h3><div class="small muted">موجب = يزوّد اللي عليه، سالب = يزوّد اللي له.</div>
       <label class="l">المبلغ</label><input class="f num" id="aa" inputmode="decimal"><label class="l">التاريخ</label><input type="date" class="f" id="ad" value="${todayStr()}">
       <label class="l">السبب</label><input class="f" id="ar"><div style="height:10px"></div><button class="btn block" id="as">حفظ التسوية</button>`);
-    $('#as').onclick = async () => { await run(() => api.addAdjustment(accId, $('#ad').value, +$('#aa').value.replace(/,/g, ''), $('#ar').value), 'اتسجلت'); closeSheet(); go('statement', accId); }; });
+    $('#as').onclick = () => locked($('#as'), async () => { await run(() => api.addAdjustment(accId, $('#ad').value, +$('#aa').value.replace(/,/g, ''), $('#ar').value), 'اتسجلت'); closeSheet(); go('statement', accId); }); });
   $('#edA') && ($('#edA').onclick = () => { openSheet(`<h3>تعديل الحساب</h3><label class="l">الاسم</label><input class="f" id="en" value="${esc(a.name)}">
       <label class="l">النوع</label><select class="f" id="ek">${Object.entries(KIND).map(([k, v]) => `<option value="${k}" ${a.kind === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
       <label class="l">التليفون</label><input class="f num" id="ep" value="${esc(a.phone || '')}"><label class="l"><input type="checkbox" id="ea" ${a.active !== false ? 'checked' : ''}> الحساب شغال</label>
@@ -747,13 +828,66 @@ SCREENS.statement = async (accId) => {
     $('#mg').onclick = async () => { await run(() => api.setMovementCancelled(m.id, !m.cancelled, $('#mr')?.value), 'تم'); closeSheet(); go('statement', accId); }; });
 };
 function stDesc(m) { const it = m.item_id ? (S.lk.items.find(i => i.id === m.item_id)?.name) : m.item_text;
-  const parts = []; if (m.qty) parts.push(`${fmtq(m.qty)} ${it || ''}${m.price ? ' × ' + fmt(m.price) : ''}`.trim()); else if (it) parts.push(it);
+  const parts = []; if (m.qty) parts.push(`${fmtq(m.qty)} ${it || ''}${m.price ? ' × ' + fmt(m.price) : m.pending_side ? ' — السعر لم يحدد' : ''}`.trim()); else if (it) parts.push(it);
   const d = m.description || ''; if (d && !(m.qty && /^(بيع|وارد)( — |$)/.test(d))) parts.push(d); if (m.notes) parts.push(m.notes);
   if (m.source === 'adjustment' && !d.startsWith('تسوية')) parts.unshift('تسوية'); return parts.join(' · '); }
 
+// ---------------------------------------------------------------- طباعة كشف الحساب وتصديره (للعميل)
+// من ناحية العميل: «عليك» = مطلوب منك لينا · «لك» = مستحق لك عندنا — من غير سالب وموجب
+function stItem(m) { const it = m.item_id ? (S.lk.items.find(i => i.id === m.item_id)?.name) : m.item_text; const d = m.description || '';
+  const parts = []; if (m.qty) { if (it) parts.push(it); } else if (it) parts.push(it);
+  if (d && !(m.qty && /^(بيع|وارد)( — |$)/.test(d))) parts.push(d); if (m.notes) parts.push(m.notes); if (m.source === 'adjustment' && !d.startsWith('تسوية')) parts.unshift('تسوية');
+  return parts.join(' · ') || (m.qty ? 'بضاعة' : ''); }
+function stFinal(bal) { bal = +bal || 0; if (Math.abs(bal) < 0.005) return 'الحساب خالص — مفيش رصيد مستحق';
+  return bal > 0 ? `الرصيد المستحق عليك: ${fmt(bal)} جنيه` : `الرصيد المستحق لك: ${fmt(-bal)} جنيه`; }
+function statementPrint(a, rows, opening, from, to) {
+  const totD = rows.reduce((s, r) => s + (+r.debit || 0), 0), totC = rows.reduce((s, r) => s + (+r.credit || 0), 0);
+  const last = rows.length ? rows[rows.length - 1].bal : opening, np = rows.filter(r => r.pending_side).length;
+  return `<div class="pdoc"><h1>${esc(S.lk.settings.company_name || '')}</h1><h2>كشف حساب: ${esc(a.name)}</h2>
+    <div class="meta"><span>الفترة: <span dir="ltr">${from || 'من البداية'}</span> إلى <span dir="ltr">${to || todayStr()}</span></span><span>تاريخ الكشف: <span dir="ltr">${todayStr()}</span></span></div>
+    <table><thead><tr><th style="width:12%">التاريخ</th><th>البيان</th><th style="width:9%">الكمية</th><th style="width:11%">السعر</th><th style="width:12%">عليك</th><th style="width:12%">لك</th><th style="width:15%">الرصيد</th></tr></thead><tbody>
+    ${from ? `<tr><td></td><td><b>رصيد سابق قبل <span dir="ltr">${from}</span></b></td><td></td><td></td><td></td><td></td><td><b>${balWord(opening, true)}</b></td></tr>` : ''}
+    ${rows.map(r => `<tr><td class="n">${r.day}</td><td>${esc(stItem(r))}</td><td class="n">${r.qty ? fmtq(r.qty) : ''}</td>
+      <td class="${r.pending_side ? 'np' : 'n'}">${r.pending_side ? 'السعر لم يحدد' : r.price ? fmt(r.price) : ''}</td>
+      <td class="n">${+r.debit ? fmt(r.debit) : ''}</td><td class="n">${+r.credit ? fmt(r.credit) : ''}</td><td>${balWord(r.bal, true)}</td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center">مفيش حركات في الفترة دي</td></tr>'}
+    <tr class="tot"><td></td><td>الإجمالي</td><td></td><td></td><td class="n">${fmt(totD)}</td><td class="n">${fmt(totC)}</td><td></td></tr></tbody></table>
+    <div class="box">${stFinal(last)}</div>
+    ${np ? `<div class="note np">⚠️ فيه ${np} كمية «السعر لم يحدد» — الرصيد هيتغير لما تتسعّر.</div>` : ''}
+    <div class="note">«عليك» = مبلغ مطلوب منك لينا · «لك» = مبلغ مستحق لك عندنا.</div></div>`; }
+async function statementExcel(a, rows, opening, from, to) {
+  await loadExcelJS();
+  const wb = new ExcelJS.Workbook(); wb.creator = S.lk.settings.company_name || 'الحسابات';
+  const ws = wb.addWorksheet('كشف حساب', {views: [{rightToLeft: true, state: 'frozen', ySplit: 6}],
+    pageSetup: {paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 0, printTitlesRow: '6:6', margins: {left: .35, right: .35, top: .5, bottom: .5, header: .2, footer: .2}}});
+  ws.columns = [{width: 12}, {width: 44}, {width: 10}, {width: 15}, {width: 15}, {width: 15}, {width: 15}, {width: 7}];
+  const F = {name: 'Arial', size: 11}, thin = {style: 'thin', color: {argb: 'FF8A94A0'}}, B = {top: thin, left: thin, bottom: thin, right: thin};
+  const NUM = '#,##0.00;-#,##0.00;""', QTY = '#,##0.###';
+  const head = (r, text, f, h) => { ws.mergeCells(r, 1, r, 8); const c = ws.getCell(r, 1); c.value = text; c.font = {...F, ...f}; c.alignment = {horizontal: 'center', vertical: 'middle'}; if (h) ws.getRow(r).height = h; };
+  head(1, S.lk.settings.company_name || '', {size: 16, bold: true}, 26); head(2, 'كشف حساب: ' + a.name, {size: 14, bold: true}, 22);
+  head(3, `الفترة: ${from || 'من البداية'} إلى ${to || todayStr()}     تاريخ الكشف: ${todayStr()}`, {size: 10, color: {argb: 'FF444444'}});
+  head(4, '«عليك» = مبلغ مطلوب منك لينا  ·  «لك» = مبلغ مستحق لك عندنا', {size: 10, color: {argb: 'FF444444'}});
+  const hr = ws.getRow(6); ['التاريخ', 'البيان', 'الكمية', 'السعر', 'عليك', 'لك', 'الرصيد', ''].forEach((t, i) => { const c = hr.getCell(i + 1); c.value = t; c.font = {...F, bold: true, color: {argb: 'FFFFFFFF'}};
+    c.fill = {type: 'pattern', pattern: 'solid', fgColor: {argb: 'FF1F3B57'}}; c.alignment = {horizontal: 'center', vertical: 'middle'}; c.border = B; }); ws.mergeCells(6, 7, 6, 8); hr.height = 20;
+  let r = 7; const word = b => Math.abs(+b || 0) < 0.005 ? '' : (+b > 0 ? 'عليك' : 'لك');
+  const put = (vals, opt = {}) => { const row = ws.getRow(r); vals.forEach((v, i) => { const c = row.getCell(i + 1); c.value = v === '' ? null : v; c.font = {...F, ...(opt.bold ? {bold: true} : {})}; c.border = B;
+      c.alignment = {vertical: 'top', horizontal: i === 1 ? 'right' : 'center', wrapText: i === 1};
+      if ([4, 5, 6].includes(i) && typeof v === 'number') { c.numFmt = NUM; c.alignment.horizontal = 'left'; } if (i === 3 && typeof v === 'number') { c.numFmt = NUM; c.alignment.horizontal = 'left'; }
+      if (i === 2 && typeof v === 'number') c.numFmt = QTY; if (opt.fill) c.fill = {type: 'pattern', pattern: 'solid', fgColor: {argb: opt.fill}}; });
+    r++; return row; };
+  if (from) put(['', 'رصيد سابق قبل ' + from, '', '', '', '', Math.abs(+opening) || 0, word(opening)], {bold: true, fill: 'FFF1F4F8'});
+  rows.forEach((m, k) => { const row = put([m.day, stItem(m), m.qty ? +m.qty : '', m.pending_side ? 'السعر لم يحدد' : (m.price ? +m.price : ''), +m.debit || '', +m.credit || '', Math.abs(+m.bal || 0), word(m.bal)], {fill: k % 2 ? 'FFF7F9FB' : null});
+    if (m.pending_side) row.getCell(4).font = {...F, italic: true, color: {argb: 'FFA15C00'}}; });
+  const totD = rows.reduce((s, x) => s + (+x.debit || 0), 0), totC = rows.reduce((s, x) => s + (+x.credit || 0), 0), last = rows.length ? rows[rows.length - 1].bal : opening;
+  put(['', 'الإجمالي', '', '', round2(totD), round2(totC), '', ''], {bold: true, fill: 'FFE9EDF2'});
+  r++; ws.mergeCells(r, 1, r, 8); const fc = ws.getCell(r, 1); fc.value = stFinal(last); fc.font = {...F, size: 13, bold: true}; fc.alignment = {horizontal: 'center', vertical: 'middle'};
+  fc.border = {top: {style: 'medium'}, left: {style: 'medium'}, bottom: {style: 'medium'}, right: {style: 'medium'}}; fc.fill = {type: 'pattern', pattern: 'solid', fgColor: {argb: +last > 0.005 ? 'FFFFF4E5' : 'FFE8F6EC'}}; ws.getRow(r).height = 24;
+  const np = rows.filter(x => x.pending_side).length; if (np) { r += 1; head(r, `⚠️ فيه ${np} كمية «السعر لم يحدد» — الرصيد هيتغير لما تتسعّر`, {size: 10, color: {argb: 'FFA15C00'}}); }
+  const buf = await wb.xlsx.writeBuffer();
+  downloadBlob(new Blob([buf], {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), `كشف حساب ${a.name} ${todayStr()}.xlsx`); }
+
 // ---------------------------------------------------------------- الكاش
 SCREENS.cash = async () => {
-  const d = await api.day(S.day); const exp = await api.cashExpected(S.day);
+  const d = await api.day(S.day); const exp = await api.cashExpected(S.day); const mbs = await api.methodBalances().catch(() => []);
   const cashIds = new Set(S.lk.methods.filter(m => m.kind === 'cash').map(m => m.id));
   const ins = [], outs = [];
   for (const l of d.lines) { if (l.status === 'cancelled') continue; const a = +lineAmount(l) || 0; const isCash = cashIds.has(+l.payment_method_id);
@@ -767,6 +901,8 @@ SCREENS.cash = async () => {
     ${d.cash && +d.cash.diff ? `<div class="card bad">فرق في الجرد: <span class="amt">${fmt(d.cash.diff)}</span> — ${esc(d.cash.note || '')}</div>` : ''}
     <div class="card"><h2>كاش داخل <span class="amt muted small">${fmt(sIn)}</span></h2>${ins.map(li).join('') || '<div class="empty">مفيش</div>'}</div>
     <div class="card"><h2>كاش طالع <span class="amt muted small">${fmt(sOut)}</span></h2>${outs.map(li).join('') || '<div class="empty">مفيش</div>'}</div>
+    ${mbs.some(m => m.kind !== 'cash' && m.active && (m.opening_day || +m.balance)) ? `<div class="card"><h2>البنوك والمحافظ (للعلم)</h2>${mbs.filter(m => m.kind !== 'cash' && m.active).map(m => `<div class="row small" style="padding:5px 0;border-bottom:1px solid var(--line)"><div class="grow">${esc(m.name)}${m.opening_day ? ` <span class="muted">من ${m.opening_day}</span>` : ' <span class="muted">(مفيش رصيد بداية)</span>'}</div><b class="amt">${fmt(m.balance)}</b></div>`).join('')}
+      <div class="small muted" style="margin-top:4px">الرصيد لحد النهارده من اللي اتسجل في اليومية — طابقه مع برنامج البنوك.</div></div>` : ''}
     ${isMgr() ? '<button class="btn block" id="toPost">الجرد وقفل اليوم</button>' : ''}`);
   $('#dpick').onchange = e => { S.day = e.target.value; go('cash'); }; $('#toPost') && ($('#toPost').onclick = () => go('posting'));
 };
@@ -836,12 +972,16 @@ SCREENS.reports = async () => {
 SCREENS.settings = async () => {
   if (!isAdmin()) return shell('<div class="card">للمدير بس</div>');
   await loadLookups(); const L = S.lk; const oc = L.settings.opening_cash || {};
+  const mb = new Map((await api.methodBalances().catch(() => [])).map(m => [m.id, m]));
   const kinds = {cash: 'كاش', bank: 'بنك', wallet: 'محفظة', instapay: 'إنستاباي', cheque: 'شيك'};
   shell(`<div class="card"><h2>الاسم اللي فوق</h2><div class="row"><input class="f" id="cn" value="${esc(L.settings.company_name || '')}"><button class="btn sm" id="cnS">حفظ</button></div></div>
     <div class="card"><h2>رصيد الكاش يوم البداية</h2><div class="small muted">الكاش اللي في الدرج آخر يوم قبل ما تبدأوا على الموقع.</div><div class="grid2"><div><label class="l">التاريخ</label><input type="date" class="f" id="ocd" value="${oc.day || ''}"></div><div><label class="l">المبلغ</label><input class="f num" id="oca" value="${oc.amount ?? ''}"></div></div><div style="height:8px"></div><button class="btn sm" id="ocS">حفظ</button></div>
     <div class="card"><h2>المخازن</h2>${L.warehouses.map(w => `<div class="row" style="margin-bottom:6px"><input class="f" data-wh="${w.id}" value="${esc(w.name)}"><label class="small"><input type="checkbox" data-wha="${w.id}" ${w.active ? 'checked' : ''}> شغال</label></div>`).join('')}
       <div class="row"><input class="f" id="nwh" placeholder="مخزن جديد"><button class="btn sm" id="whS">حفظ</button></div></div>
-    <div class="card"><h2>طرق الدفع</h2><div class="small muted">البنوك والمحافظ هنا للعلم بس (أسماء من غير أرصدة).</div>${L.methods.map(m => `<div class="row" style="margin-bottom:6px"><input class="f" data-pm="${m.id}" value="${esc(m.name)}"><span class="chip">${kinds[m.kind]}</span><label class="small"><input type="checkbox" data-pma="${m.id}" ${m.active ? 'checked' : ''}> شغال</label></div>`).join('')}
+    <div class="card"><h2>البنوك والمحافظ (طرق الدفع)</h2><div class="small muted">للعلم بس — الرصيد = رصيد البداية + اللي اتسجل في اليومية بعد تاريخه. رصيد الكاش من الخانة اللي فوق.</div>${L.methods.map(m => `<div style="border-bottom:1px solid var(--line);padding:8px 0">
+      <div class="row"><input class="f" data-pm="${m.id}" value="${esc(m.name)}"><span class="chip">${kinds[m.kind]}</span><label class="small"><input type="checkbox" data-pma="${m.id}" ${m.active ? 'checked' : ''}> شغال</label></div>
+      ${m.kind === 'cash' ? '' : `<div class="grid2" style="margin-top:4px"><div><label class="l">رصيد البداية</label><input class="f num" data-pmo="${m.id}" inputmode="decimal" value="${m.opening_balance ?? ''}"></div><div><label class="l">بتاريخ (آخر اليوم)</label><input type="date" class="f" data-pmd="${m.id}" value="${m.opening_day || ''}"></div></div>
+        ${mb.has(m.id) ? `<div class="small" style="margin-top:3px">الرصيد دلوقتي: <b class="amt">${fmt(mb.get(m.id).balance)}</b></div>` : ''}`}</div>`).join('')}
       <div class="row"><input class="f" id="npm" placeholder="اسم البنك / المحفظة"><select class="f" id="npk" style="max-width:120px">${Object.entries(kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div><div style="height:6px"></div><button class="btn sm" id="pmS">حفظ</button></div>
     <div class="card"><h2>الأصناف</h2><input class="f" id="iq" placeholder="ابحث"><div class="list" id="il" style="max-height:340px;overflow:auto"></div>
       <div class="grid2" style="margin-top:8px"><input class="f" id="ni" placeholder="صنف جديد"><select class="f" id="nic"><option>حديد</option><option>أسمنت</option><option>أخرى</option></select></div><div style="height:6px"></div><button class="btn sm" id="niS">إضافة صنف</button></div>`);
@@ -849,8 +989,13 @@ SCREENS.settings = async () => {
   $('#ocS').onclick = async () => { await run(() => api.saveSetting('opening_cash', {day: $('#ocd').value, amount: +$('#oca').value.replace(/,/g, '') || 0}), 'اتحفظ'); go('settings'); };
   $('#whS').onclick = async () => { for (const w of L.warehouses) { const n = document.querySelector(`[data-wh="${w.id}"]`).value.trim(), ac = document.querySelector(`[data-wha="${w.id}"]`).checked; if (n !== w.name || ac !== w.active) await run(() => api.saveRow('warehouses', {id: w.id, name: n, active: ac})); }
     if ($('#nwh').value.trim()) await run(() => api.saveRow('warehouses', {name: $('#nwh').value.trim()})); toast('اتحفظ'); go('settings'); };
-  $('#pmS').onclick = async () => { for (const m of L.methods) { const n = document.querySelector(`[data-pm="${m.id}"]`).value.trim(), ac = document.querySelector(`[data-pma="${m.id}"]`).checked; if (n !== m.name || ac !== m.active) await run(() => api.saveRow('payment_methods', {id: m.id, name: n, active: ac})); }
-    if ($('#npm').value.trim()) await run(() => api.saveRow('payment_methods', {name: $('#npm').value.trim(), kind: $('#npk').value, sort: L.methods.length})); toast('اتحفظ'); go('settings'); };
+  $('#pmS').onclick = () => locked($('#pmS'), async () => { for (const m of L.methods) { const n = document.querySelector(`[data-pm="${m.id}"]`).value.trim(), ac = document.querySelector(`[data-pma="${m.id}"]`).checked;
+      const oi = document.querySelector(`[data-pmo="${m.id}"]`), di = document.querySelector(`[data-pmd="${m.id}"]`);
+      const ob = oi ? (oi.value.trim() === '' ? null : +oi.value.replace(/,/g, '')) : (m.opening_balance ?? null), od = di ? (di.value || null) : (m.opening_day || null);
+      if (ob != null && !od) { toast(`حط تاريخ رصيد البداية لـ ${n}`, true); return; }
+      if (n !== m.name || ac !== m.active || ob !== (m.opening_balance == null ? null : +m.opening_balance) || od !== (m.opening_day || null))
+        await run(() => api.saveRow('payment_methods', {id: m.id, name: n, active: ac, ...(oi ? {opening_balance: ob, opening_day: od} : {})})); }
+    if ($('#npm').value.trim()) await run(() => api.saveRow('payment_methods', {name: $('#npm').value.trim(), kind: $('#npk').value, sort: L.methods.length})); toast('اتحفظ'); go('settings'); });
   const drawI = () => { const q = normAr($('#iq').value); $('#il').innerHTML = L.items.filter(i => !q || normAr(i.name).includes(q)).map(i => `<div class="it" data-it="${i.id}"><div class="grow"><div class="t">${esc(i.name)}</div><div class="s">${i.category} · ${i.unit} · ${L.aliases.filter(a => a.item_id === i.id).length} اسم قديم</div></div>${i.active ? '' : '<span class="chip">موقوف</span>'}</div>`).join('');
     document.querySelectorAll('[data-it]').forEach(e => e.onclick = () => itemEdit(L.items.find(i => i.id === +e.dataset.it))); };
   $('#iq').oninput = drawI; drawI();
