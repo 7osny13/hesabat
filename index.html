@@ -788,7 +788,7 @@ SCREENS.statement = async (accId) => {
         <div><b>الصافي المجمّع: ${balTxt(round2(linked.reduce((t, x) => t + +x.balance, +a.balance)))}</b></div></div>` : ''}
       <div class="grid2 noprint" style="margin-top:8px"><div><label class="l">من</label><input type="date" class="f" id="f1" value="${from}"></div><div><label class="l">إلى</label><input type="date" class="f" id="f2" value="${to}"></div></div>
       <div class="row wrap noprint" style="margin-top:8px"><label class="small"><input type="checkbox" id="scx" ${S.stF.showCx ? 'checked' : ''}> إظهار الملغي</label><div class="grow"></div>
-        <button class="btn sm sec" id="pr">طباعة</button><button class="btn sm sec" id="xl">Excel</button>${isMgr() ? '<button class="btn sm sec" id="adj">تسوية</button><button class="btn sm sec" id="edA">تعديل</button><button class="btn sm sec" id="lnk">ربط</button>' : ''}</div></div>
+        <button class="btn sm" id="wa" style="background:#1fa855">واتساب</button><button class="btn sm sec" id="pr">طباعة</button><button class="btn sm sec" id="xl">Excel</button>${isMgr() ? '<button class="btn sm sec" id="adj">تسوية</button><button class="btn sm sec" id="edA">تعديل</button><button class="btn sm sec" id="lnk">ربط</button>' : ''}</div></div>
     <div class="card narrow stl screenonly">${from ? `<div class="r"><div class="n"><div class="grow">رصيد قبل ${from}</div><b class="amt">${fmt(opening)}</b></div></div>` : ''}
       ${rows.map(r => `<div class="r ${r.cancelled ? 'cx' : ''}" data-m="${r.id}"><div class="d">${esc(stDesc(r))}</div>${r.cancelled && r.cancel_reason ? `<div class="small bad">ملغي: ${esc(r.cancel_reason)}</div>` : ''}
         <div class="n"><div class="grow amt">${r.day}</div>${r.pending_side ? npTag : ''}${+r.debit ? `<span class="owe">عليه <span class="amt">${fmt(r.debit)}</span></span>` : ''}${+r.credit ? `<span class="cred">له <span class="amt">${fmt(r.credit)}</span></span>` : ''}
@@ -812,6 +812,7 @@ SCREENS.statement = async (accId) => {
   const upd = () => { S.stF.from = $('#f1').value; S.stF.to = $('#f2').value; S.stF.showCx = $('#scx').checked; go('statement', accId); };
   $('#f1').onchange = upd; $('#f2').onchange = upd; $('#scx').onchange = upd; $('#pr').onclick = () => window.print();
   $('#xl').onclick = () => locked($('#xl'), () => run(() => statementExcel(a, pr, opening, from, to)));
+  $('#wa').onclick = () => whatsappFlow(a, pr, opening, from, to);
   $('#adj') && ($('#adj').onclick = () => { openSheet(`<h3>تسوية على ${esc(a.name)}</h3><div class="small muted">موجب = يزوّد اللي عليه، سالب = يزوّد اللي له.</div>
       <label class="l">المبلغ</label><input class="f num" id="aa" inputmode="decimal"><label class="l">التاريخ</label><input type="date" class="f" id="ad" value="${todayStr()}">
       <label class="l">السبب</label><input class="f" id="ar"><div style="height:10px"></div><button class="btn block" id="as">حفظ التسوية</button>`);
@@ -854,7 +855,7 @@ function statementPrint(a, rows, opening, from, to) {
     <div class="box">${stFinal(last)}</div>
     ${np ? `<div class="note np">⚠️ فيه ${np} كمية «السعر لم يحدد» — الرصيد هيتغير لما تتسعّر.</div>` : ''}
     <div class="note">«عليك» = مبلغ مطلوب منك لينا · «لك» = مبلغ مستحق لك عندنا.</div></div>`; }
-async function statementExcel(a, rows, opening, from, to) {
+async function statementExcel(a, rows, opening, from, to, asFile) {
   await loadExcelJS();
   const wb = new ExcelJS.Workbook(); wb.creator = S.lk.settings.company_name || 'الحسابات';
   const ws = wb.addWorksheet('كشف حساب', {views: [{rightToLeft: true, state: 'frozen', ySplit: 6}],
@@ -883,7 +884,37 @@ async function statementExcel(a, rows, opening, from, to) {
   fc.border = {top: {style: 'medium'}, left: {style: 'medium'}, bottom: {style: 'medium'}, right: {style: 'medium'}}; fc.fill = {type: 'pattern', pattern: 'solid', fgColor: {argb: +last > 0.005 ? 'FFFFF4E5' : 'FFE8F6EC'}}; ws.getRow(r).height = 24;
   const np = rows.filter(x => x.pending_side).length; if (np) { r += 1; head(r, `⚠️ فيه ${np} كمية «السعر لم يحدد» — الرصيد هيتغير لما تتسعّر`, {size: 10, color: {argb: 'FFA15C00'}}); }
   const buf = await wb.xlsx.writeBuffer();
+  if (asFile) return new File([buf], `كشف حساب ${a.name} ${todayStr()}.xlsx`, {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
   downloadBlob(new Blob([buf], {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), `كشف حساب ${a.name} ${todayStr()}.xlsx`); }
+
+// ---------------------------------------------------------------- مشاركة الكشف على واتساب
+const waPhone = p => { let d = String(p || '').replace(/[^\d]/g, ''); if (!d) return '';
+  if (d.startsWith('00')) d = d.slice(2); if (d.startsWith('01') && d.length === 11) d = '2' + d; else if (d.startsWith('1') && d.length === 10) d = '20' + d; return d; };
+function waText(a, rows, opening, from, n) {
+  const last = rows.length ? rows[rows.length - 1].bal : opening, list = n ? rows.slice(-n) : [];
+  const lines = [`السلام عليكم ${a.name}`, `كشف حساب من ${S.lk.settings.company_name || ''} — بتاريخ ${todayStr()}`];
+  if (list.length) { lines.push('', n < rows.length ? `آخر ${list.length} حركات:` : 'الحركات:');
+    list.forEach(r => { const amt = r.pending_side ? 'السعر لم يحدد' : +r.debit ? `عليك ${fmt(r.debit)}` : +r.credit ? `لك ${fmt(r.credit)}` : '';
+      lines.push(`• ${r.day} — ${r.qty ? fmtq(r.qty) + ' ' : ''}${stItem(r)}${r.price && !r.pending_side ? ' × ' + fmt(r.price) : ''} — ${amt}`); }); }
+  lines.push('', '*' + stFinal(last) + '*');
+  if (rows.some(r => r.pending_side)) lines.push('(فيه كميات السعر لم يحدد — الرصيد هيتغير لما تتسعّر)');
+  return lines.join('\n'); }
+function whatsappFlow(a, rows, opening, from, to) {
+  const canFile = !!(navigator.canShare && navigator.canShare({files: [new File(['x'], 'x.xlsx', {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})]}));
+  openSheet(`<h3>إرسال الكشف على واتساب</h3>
+    <label class="l">رقم العميل</label><input class="f num" id="wp" inputmode="tel" placeholder="01xxxxxxxxx" value="${esc(a.phone || '')}">
+    ${isMgr() ? '<label class="small"><input type="checkbox" id="wsave"> احفظ الرقم على حساب العميل</label>' : ''}
+    <label class="l">الحركات في الرسالة</label><select class="f" id="wn"><option value="0">الرصيد بس</option><option value="5">آخر 5 حركات</option><option value="10" selected>آخر 10 حركات</option><option value="9999">كل الحركات (في الفترة)</option></select>
+    <label class="l">الرسالة (تقدر تعدّل فيها)</label><textarea class="f" id="wt" rows="9" style="font-size:13.5px"></textarea>
+    <div style="height:10px"></div><button class="btn block" id="wgo" style="background:#1fa855">فتح واتساب بالرسالة</button>
+    ${canFile ? '<div style="height:8px"></div><button class="btn sec block" id="wfile">إرسال ملف الكشف (Excel) — اختار واتساب</button>' : ''}`);
+  const fill = () => { $('#wt').value = waText(a, rows, opening, from, +$('#wn').value); }; fill(); $('#wn').onchange = fill;
+  $('#wgo').onclick = async () => { const ph = waPhone($('#wp').value);
+    if ($('#wsave')?.checked && $('#wp').value.trim() && $('#wp').value.trim() !== (a.phone || '')) await run(() => api.updateAccount(a.id, {phone: $('#wp').value.trim()})).catch(() => {});
+    window.open(`https://wa.me/${ph}?text=${encodeURIComponent($('#wt').value)}`, '_blank'); };
+  $('#wfile') && ($('#wfile').onclick = () => locked($('#wfile'), async () => { try { const f = await statementExcel(a, rows, opening, from, to, true);
+      await navigator.share({files: [f], title: 'كشف حساب ' + a.name}); } catch (e) { if (e && e.name !== 'AbortError') toast(errMsg(e), true); } }));
+}
 
 // ---------------------------------------------------------------- الكاش
 SCREENS.cash = async () => {
