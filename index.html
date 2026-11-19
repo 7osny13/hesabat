@@ -89,7 +89,7 @@ table.t tr.cx td{text-decoration:line-through;opacity:.5}
 .pdoc tr{page-break-inside:avoid}.pdoc td.n{direction:ltr;text-align:left;white-space:nowrap;font-variant-numeric:tabular-nums}
 .pdoc .sec{font-weight:700;font-size:13px;margin:8px 0 3px}.pdoc .tot td{font-weight:700;background:#f4f6f8;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .pdoc .np{color:#a15c00;font-style:italic}.pdoc .box{border:2px solid #000;border-radius:6px;padding:8px 10px;font-size:15px;font-weight:700;text-align:center;margin:8px 0}
-.pdoc .note{font-size:11px;color:#333}.pdoc .sign{display:flex;justify-content:space-around;margin-top:22px;font-size:12px}
+.pdoc .note{font-size:11px;color:#333}.pdoc .fx{display:inline-flex;flex-wrap:wrap;gap:0 5px;align-items:baseline;justify-content:center}.pdoc .meta .fx{justify-content:flex-start}.pdoc td .fx{justify-content:flex-start}.pdoc .sign{display:flex;justify-content:space-around;margin-top:22px;font-size:12px}
 table.pj{width:100%;border-collapse:collapse;font-size:12px}table.pj th,table.pj td{border:1px solid #999;padding:4px 6px;vertical-align:top}
 @media print{.printonly{display:block}.screenonly{display:none!important}
   header.top,nav.bottom,.noprint,.demo,.toast,.sheet-bg{display:none!important}
@@ -788,7 +788,7 @@ SCREENS.statement = async (accId) => {
         <div><b>الصافي المجمّع: ${balTxt(round2(linked.reduce((t, x) => t + +x.balance, +a.balance)))}</b></div></div>` : ''}
       <div class="grid2 noprint" style="margin-top:8px"><div><label class="l">من</label><input type="date" class="f" id="f1" value="${from}"></div><div><label class="l">إلى</label><input type="date" class="f" id="f2" value="${to}"></div></div>
       <div class="row wrap noprint" style="margin-top:8px"><label class="small"><input type="checkbox" id="scx" ${S.stF.showCx ? 'checked' : ''}> إظهار الملغي</label><div class="grow"></div>
-        <button class="btn sm" id="wa" style="background:#1fa855">واتساب</button><button class="btn sm sec" id="pr">طباعة</button><button class="btn sm sec" id="xl">Excel</button>${isMgr() ? '<button class="btn sm sec" id="adj">تسوية</button><button class="btn sm sec" id="edA">تعديل</button><button class="btn sm sec" id="lnk">ربط</button>' : ''}</div></div>
+        <button class="btn sm" id="wa" style="background:#1fa855">واتساب PDF</button><button class="btn sm sec" id="pr">طباعة</button><button class="btn sm sec" id="xl">Excel</button>${isMgr() ? '<button class="btn sm sec" id="adj">تسوية</button><button class="btn sm sec" id="edA">تعديل</button><button class="btn sm sec" id="lnk">ربط</button>' : ''}</div></div>
     <div class="card narrow stl screenonly">${from ? `<div class="r"><div class="n"><div class="grow">رصيد قبل ${from}</div><b class="amt">${fmt(opening)}</b></div></div>` : ''}
       ${rows.map(r => `<div class="r ${r.cancelled ? 'cx' : ''}" data-m="${r.id}"><div class="d">${esc(stDesc(r))}</div>${r.cancelled && r.cancel_reason ? `<div class="small bad">ملغي: ${esc(r.cancel_reason)}</div>` : ''}
         <div class="n"><div class="grow amt">${r.day}</div>${r.pending_side ? npTag : ''}${+r.debit ? `<span class="owe">عليه <span class="amt">${fmt(r.debit)}</span></span>` : ''}${+r.credit ? `<span class="cred">له <span class="amt">${fmt(r.credit)}</span></span>` : ''}
@@ -841,20 +841,26 @@ function stItem(m) { const it = m.item_id ? (S.lk.items.find(i => i.id === m.ite
   return parts.join(' · ') || (m.qty ? 'بضاعة' : ''); }
 function stFinal(bal) { bal = +bal || 0; if (Math.abs(bal) < 0.005) return 'الحساب خالص — مفيش رصيد مستحق';
   return bal > 0 ? `الرصيد المستحق عليك: ${fmt(bal)} جنيه` : `الرصيد المستحق لك: ${fmt(-bal)} جنيه`; }
+// كل جزء في span لوحده (عربي لوحده وأرقام لوحدها) — عشان الطباعة وملف الـ PDF ميلخبطوش الترتيب
+const fx = (...parts) => `<span class="fx">${parts.filter(x => x !== '' && x != null).map(x => `<span>${x}</span>`).join('')}</span>`;
+const N = v => `<span dir="ltr">${v}</span>`;
+const bwP = b => { b = +b || 0; if (Math.abs(b) < 0.005) return 'صفر'; return fx(N(fmt(Math.abs(b))), b > 0 ? 'عليك' : 'لك'); };
+const finalP = bal => { bal = +bal || 0; if (Math.abs(bal) < 0.005) return fx('الحساب خالص', '—', 'مفيش رصيد مستحق');
+  return fx(bal > 0 ? 'الرصيد المستحق عليك' : 'الرصيد المستحق لك', N(fmt(Math.abs(bal))), 'جنيه'); };
 function statementPrint(a, rows, opening, from, to) {
   const totD = rows.reduce((s, r) => s + (+r.debit || 0), 0), totC = rows.reduce((s, r) => s + (+r.credit || 0), 0);
   const last = rows.length ? rows[rows.length - 1].bal : opening, np = rows.filter(r => r.pending_side).length;
-  return `<div class="pdoc"><h1>${esc(S.lk.settings.company_name || '')}</h1><h2>كشف حساب: ${esc(a.name)}</h2>
-    <div class="meta"><span>الفترة: <span dir="ltr">${from || 'من البداية'}</span> إلى <span dir="ltr">${to || todayStr()}</span></span><span>تاريخ الكشف: <span dir="ltr">${todayStr()}</span></span></div>
+  return `<div class="pdoc"><h1>${esc(S.lk.settings.company_name || '')}</h1><h2>${fx('كشف حساب', esc(a.name))}</h2>
+    <div class="meta">${fx('الفترة', from ? N(from) : 'من البداية', 'إلى', N(to || todayStr()))}${fx('تاريخ الكشف', N(todayStr()))}</div>
     <table><thead><tr><th style="width:12%">التاريخ</th><th>البيان</th><th style="width:9%">الكمية</th><th style="width:11%">السعر</th><th style="width:12%">عليك</th><th style="width:12%">لك</th><th style="width:15%">الرصيد</th></tr></thead><tbody>
-    ${from ? `<tr><td></td><td><b>رصيد سابق قبل <span dir="ltr">${from}</span></b></td><td></td><td></td><td></td><td></td><td><b>${balWord(opening, true)}</b></td></tr>` : ''}
+    ${from ? `<tr><td></td><td><b>${fx('رصيد سابق قبل', N(from))}</b></td><td></td><td></td><td></td><td></td><td><b>${bwP(opening)}</b></td></tr>` : ''}
     ${rows.map(r => `<tr><td class="n">${r.day}</td><td>${esc(stItem(r))}</td><td class="n">${r.qty ? fmtq(r.qty) : ''}</td>
       <td class="${r.pending_side ? 'np' : 'n'}">${r.pending_side ? 'السعر لم يحدد' : r.price ? fmt(r.price) : ''}</td>
-      <td class="n">${+r.debit ? fmt(r.debit) : ''}</td><td class="n">${+r.credit ? fmt(r.credit) : ''}</td><td>${balWord(r.bal, true)}</td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center">مفيش حركات في الفترة دي</td></tr>'}
+      <td class="n">${+r.debit ? fmt(r.debit) : ''}</td><td class="n">${+r.credit ? fmt(r.credit) : ''}</td><td>${bwP(r.bal)}</td></tr>`).join('') || '<tr><td colspan="7" style="text-align:center">مفيش حركات في الفترة دي</td></tr>'}
     <tr class="tot"><td></td><td>الإجمالي</td><td></td><td></td><td class="n">${fmt(totD)}</td><td class="n">${fmt(totC)}</td><td></td></tr></tbody></table>
-    <div class="box">${stFinal(last)}</div>
-    ${np ? `<div class="note np">⚠️ فيه ${np} كمية «السعر لم يحدد» — الرصيد هيتغير لما تتسعّر.</div>` : ''}
-    <div class="note">«عليك» = مبلغ مطلوب منك لينا · «لك» = مبلغ مستحق لك عندنا.</div></div>`; }
+    <div class="box">${finalP(last)}</div>
+    ${np ? `<div class="note np">${fx('⚠️', `فيه ${np} كمية`, '«السعر لم يحدد»', '—', 'الرصيد هيتغير لما تتسعّر')}</div>` : ''}
+    <div class="note">${fx('«عليك»', '=', 'مبلغ مطلوب منك لينا', '·', '«لك»', '=', 'مبلغ مستحق لك عندنا')}</div></div>`; }
 async function statementExcel(a, rows, opening, from, to, asFile) {
   await loadExcelJS();
   const wb = new ExcelJS.Workbook(); wb.creator = S.lk.settings.company_name || 'الحسابات';
@@ -887,28 +893,38 @@ async function statementExcel(a, rows, opening, from, to, asFile) {
   if (asFile) return new File([buf], `كشف حساب ${a.name} ${todayStr()}.xlsx`, {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
   downloadBlob(new Blob([buf], {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), `كشف حساب ${a.name} ${todayStr()}.xlsx`); }
 
-// ---------------------------------------------------------------- مشاركة الكشف على واتساب
-function waText(a, rows, opening, from, n) {
-  const last = rows.length ? rows[rows.length - 1].bal : opening, list = n ? rows.slice(-n) : [];
-  const lines = [`السلام عليكم ${a.name}`, `كشف حساب من ${S.lk.settings.company_name || ''} — بتاريخ ${todayStr()}`];
-  if (list.length) { lines.push('', n < rows.length ? `آخر ${list.length} حركات:` : 'الحركات:');
-    list.forEach(r => { const amt = r.pending_side ? 'السعر لم يحدد' : +r.debit ? `عليك ${fmt(r.debit)}` : +r.credit ? `لك ${fmt(r.credit)}` : '';
-      lines.push(`• ${r.day} — ${r.qty ? fmtq(r.qty) + ' ' : ''}${stItem(r)}${r.price && !r.pending_side ? ' × ' + fmt(r.price) : ''} — ${amt}`); }); }
-  lines.push('', '*' + stFinal(last) + '*');
-  if (rows.some(r => r.pending_side)) lines.push('(فيه كميات السعر لم يحدد — الرصيد هيتغير لما تتسعّر)');
-  return lines.join('\n'); }
+// ---------------------------------------------------------------- مشاركة الكشف PDF على واتساب
+let pdfLoad; function loadPdfLib() { if (window.html2pdf) return Promise.resolve();
+  return pdfLoad || (pdfLoad = new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.2/dist/html2pdf.bundle.min.js';
+    sc.onload = ok; sc.onerror = () => { pdfLoad = null; bad(new Error('مكتبة PDF محمّلتش — اتأكد من النت')); }; document.head.appendChild(sc); })); }
+async function statementPdf(a, rows, opening, from, to) {
+  await loadPdfLib(); if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  const box = document.createElement('div'); box.dir = 'rtl';
+  box.style.cssText = 'position:fixed;left:-10000px;top:0;width:760px;background:#fff;padding:0;font-family:Cairo,system-ui,sans-serif';
+  box.innerHTML = statementPrint(a, rows, opening, from, to); document.body.appendChild(box);
+  // محوّل الـ PDF بياكل المسافات في النص العربي — كل كلمة بنحطها في صندوق لوحدها
+  const tw = document.createTreeWalker(box, NodeFilter.SHOW_TEXT), nodes = []; while (tw.nextNode()) if (/\S\s+\S/.test(tw.currentNode.nodeValue)) nodes.push(tw.currentNode);
+  nodes.forEach(t => { const f = document.createDocumentFragment(); t.nodeValue.split(/(\s+)/).forEach(w => { if (!w) return;
+      if (/^\s+$/.test(w)) f.appendChild(document.createTextNode(' ')); else { const sp = document.createElement('span'); sp.style.display = 'inline-block'; sp.textContent = w; f.appendChild(sp); } });
+    t.parentNode.replaceChild(f, t); });
+  // الآيفون ليه حد أقصى لحجم الصورة (~16 مليون نقطة) — الكشوف الطويلة بتتعمل بدقة أقل عشان متفشلش
+  const sc = Math.max(0.8, Math.min(2, Math.sqrt(15e6 / (760 * Math.max(1, box.offsetHeight)))));
+  try { const blob = await html2pdf().set({margin: [8, 8, 10, 8], image: {type: 'jpeg', quality: 0.95}, html2canvas: {scale: sc, backgroundColor: '#ffffff'},
+        jsPDF: {unit: 'mm', format: 'a4', orientation: 'portrait'}, pagebreak: {mode: ['css', 'legacy'], avoid: ['tr', '.box']}}).from(box.firstElementChild).outputPdf('blob');
+    return new File([blob], `كشف حساب ${a.name} ${todayStr()}.pdf`, {type: 'application/pdf'}); }
+  finally { box.remove(); } }
 function whatsappFlow(a, rows, opening, from, to) {
-  const canFile = !!(navigator.canShare && navigator.canShare({files: [new File(['x'], 'x.xlsx', {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})]}));
-  openSheet(`<h3>إرسال الكشف على واتساب</h3>
-    <div class="small muted">واتساب هيفتح وتختار اللي عايز تبعتله.</div>
-    <label class="l">الحركات في الرسالة</label><select class="f" id="wn"><option value="0">الرصيد بس</option><option value="5">آخر 5 حركات</option><option value="10" selected>آخر 10 حركات</option><option value="9999">كل الحركات (في الفترة)</option></select>
-    <label class="l">الرسالة (تقدر تعدّل فيها)</label><textarea class="f" id="wt" rows="9" style="font-size:13.5px"></textarea>
-    <div style="height:10px"></div><button class="btn block" id="wgo" style="background:#1fa855">فتح واتساب بالرسالة</button>
-    ${canFile ? '<div style="height:8px"></div><button class="btn sec block" id="wfile">إرسال ملف الكشف (Excel) — اختار واتساب</button>' : ''}`);
-  const fill = () => { $('#wt').value = waText(a, rows, opening, from, +$('#wn').value); }; fill(); $('#wn').onchange = fill;
-  $('#wgo').onclick = () => { window.open(`https://wa.me/?text=${encodeURIComponent($('#wt').value)}`, '_blank'); };
-  $('#wfile') && ($('#wfile').onclick = () => locked($('#wfile'), async () => { try { const f = await statementExcel(a, rows, opening, from, to, true);
-      await navigator.share({files: [f], title: 'كشف حساب ' + a.name}); } catch (e) { if (e && e.name !== 'AbortError') toast(errMsg(e), true); } }));
+  openSheet(`<h3>إرسال الكشف PDF</h3><div class="small muted" id="wst">جاري تجهيز ملف الـ PDF…</div>
+    <div style="height:10px"></div><button class="btn block" id="wgo" style="background:#1fa855" disabled>إرسال على واتساب</button>
+    <div class="small muted" style="margin-top:6px">هتفتح قايمة المشاركة — اختار واتساب وبعدين الشخص.</div>`);
+  let file = null;
+  statementPdf(a, rows, opening, from, to).then(f => { file = f; if (!$('#wst')) return; $('#wst').textContent = `الملف جاهز: ${f.name} (${Math.max(1, Math.round(f.size / 1024))} KB)`; $('#wgo').disabled = false; })
+    .catch(e => { $('#wst') && ($('#wst').textContent = errMsg(e)); toast(errMsg(e), true); });
+  // المشاركة لازم تبقى من ضغطة مباشرة — عشان كده بنجهز الملف الأول وبعدين الزرار
+  $('#wgo').onclick = async () => { if (!file) return;
+    if (navigator.canShare && navigator.canShare({files: [file]})) { try { await navigator.share({files: [file], title: 'كشف حساب ' + a.name}); closeSheet(); }
+      catch (e) { if (e && e.name !== 'AbortError') toast(errMsg(e), true); } }
+    else { downloadBlob(file, file.name); toast('الجهاز ده مبيدعمش المشاركة — الملف اتنزل، ابعته من واتساب'); } };
 }
 
 // ---------------------------------------------------------------- الكاش
